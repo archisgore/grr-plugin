@@ -1,0 +1,17 @@
+[package]
+name = "grr-plugin-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tonic = "0.6"
+tonic-health = "0.5"
+portpicker = "0.1"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+log = "0.4"
+tempfile = "3.3"
+tower = "0.4"
+http = "0.2"
+hyper = "0.14"
