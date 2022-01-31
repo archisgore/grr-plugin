@@ -2,6 +2,11 @@
 name = "grr-plugin-server"
 version = "0.1.0"
 edition = "2021"
+authors = ["Archis Gore <me@archisgore.com>"]
+description = "A Rust-based go-plugin implementation, to allow Rust plugins into Go programs."
+readme = "README.md"
+license = "Apache 2.0"
+keywords = ["go-plugin", "golang", "hashicorp", "grpc"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
