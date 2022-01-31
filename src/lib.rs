@@ -1,11 +1,21 @@
 // A go-plugin Server to write Rust-based plugins to Golang.
 
 mod error;
-mod plugin_service;
 
 use error::Error;
+use http::{Request, Response};
+use hyper::Body;
+use std::clone::Clone;
 use std::env;
-use plugin_service::PluginService;
+use std::marker::Send;
+use tonic::body::BoxBody;
+use tonic::transport::NamedService;
+use tower::Service;
+
+pub trait PluginService:
+    Service<Request<Body>, Response = Response<BoxBody>> + NamedService + Clone + Send + 'static
+{
+}
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -62,6 +72,10 @@ impl Server {
     }
 
     pub async fn serve<S: PluginService>(&self, service: S) -> Result<(), Error>
+    where
+        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Error:
+            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
         log::info!("{}Serving over a Tcp Socket...", LOG_PREFIX);
 
