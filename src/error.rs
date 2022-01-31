@@ -8,21 +8,33 @@ macro_rules! log_and_escalate {
         match $e {
             Err(err) => {
                 log::error!("{},({}:{}), {:?}", function!(), file!(), line!(), err);
-                return Err(err.into());
+                return Err(Error::from(err));
             }
             Ok(o) => o,
         }
     };
 }
 
+#[macro_export]
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+        &name[..name.len() - 3]
+    }};
+}
+
 #[derive(Debug)]
 pub enum Error {
     NoTCPPortAvailable,
     GRPCHandshakeMagicCookieValueMismatch,
-    StdIoError(std::io::Error),
+    Io(std::io::Error),
     Generic(String),
-    TonicTransportError(TonicError),
-    AddrParseError(std::net::AddrParseError),
+    TonicTransport(TonicError),
+    AddrParser(std::net::AddrParseError),
 }
 
 impl Display for Error {
@@ -34,9 +46,9 @@ impl Display for Error {
             ),
             Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
             Self::Generic(s) => write!(f, "{}", s),
-            Self::StdIoError(e) => write!(f, "Error with IO: {:?}", e),
-            Self::TonicTransportError(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
-            Self::AddrParseError(e) => write!(f, "Error parsing string into a network address: {:?}", e),
+            Self::Io(e) => write!(f, "Error with IO: {:?}", e),
+            Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
+            Self::AddrParser(e) => write!(f, "Error parsing string into a network address: {:?}", e),
         }
     }
 }
@@ -45,18 +57,18 @@ impl StdError for Error {}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Self::StdIoError(err)
+        Self::Io(err)
     }
 }
 
 impl From<TonicError> for Error {
     fn from(err: TonicError) -> Self {
-        Self::TonicTransportError(err)
+        Self::TonicTransport(err)
     }
 }
 
 impl From<std::net::AddrParseError> for Error {
     fn from(err: std::net::AddrParseError) -> Self {
-        Self::AddrParseError(err)
+        Self::AddrParser(err)
     }
 }
