@@ -19,8 +19,8 @@ const LOCALHOST_ADVERTISE_ADDR: &str = "127.0.0.1";
 const LOG_PREFIX: &str = "GrrPlugin::Server: ";
 
 pub struct HandshakeConfig {
-    magic_cookie_key: String,
-    magic_cookie_value: String,
+    pub magic_cookie_key: String,
+    pub magic_cookie_value: String,
 }
 
 pub struct Server {
@@ -29,6 +29,13 @@ pub struct Server {
 }
 
 impl Server {
+    pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Server {
+        Server {
+            handshake_config,
+            protocol_version,
+        }
+    }
+
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
     fn validate_magic_cookie(&self) -> Result<(), Error> {
         log::info!("{}Validating the magic environment cookies to conduct the handshake. Expecting environment variable {}={}.",LOG_PREFIX, self.handshake_config.magic_cookie_key, self.handshake_config.magic_cookie_value);
@@ -52,7 +59,7 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn service_tcp<S>(&self, service: S) -> Result<(), Error>
+    pub async fn serve<S>(&self, service: S) -> Result<(), Error>
     where
         S: tower::Service<
                 http::Request<hyper::Body>,

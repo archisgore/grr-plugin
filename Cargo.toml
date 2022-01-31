@@ -1,5 +1,5 @@
 [package]
-name = "grr-plugin-server"
+name = "grr-plugin"
 version = "0.1.0"
 edition = "2021"
 authors = ["Archis Gore <me@archisgore.com>"]
