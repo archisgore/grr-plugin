@@ -5,22 +5,20 @@ mod error;
 mod grpc_broker;
 mod grpc_controller;
 mod grpc_stdio;
+mod plugin;
 mod unique_port;
 
 use error::Error;
 
-use grpc_broker::ConnInfo;
-use grpc_broker::ConnInfoSender;
 use http::{Request, Response};
 use hyper::Body;
+use plugin::Plugin;
 use std::clone::Clone;
 use std::env;
 use std::marker::Send;
 use tonic::body::BoxBody;
 use tonic::transport::NamedService;
 use tower::Service;
-use std::future::Future;
-use std::fmt::Debug;
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -76,13 +74,8 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn serve<S>(&self, plugin: S) -> Result<(), Error>
+    pub async fn serve<S: Plugin>(&self, plugin: S) -> Result<(), Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>>
-            + NamedService
-            + Clone
-            + Send
-            + 'static,
         <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -108,14 +101,17 @@ impl Server {
         health_reporter.set_serving::<S>().await;
         log::info!("{}serve -  gRPC Health Service created.", LOG_PREFIX);
 
-        log::info!("{}serve - picked broker port: {}", LOG_PREFIX, port);
+        log::info!("{}serve - picked broker port: {}", LOG_PREFIX, service_port);
 
-        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, port);
+        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
         let addr = log_and_escalate!(addrstr.parse());
 
         let handshakestr = format!(
             "{}|{}|tcp|{}:{}|grpc|",
-            GRPC_CORE_PROTOCOL_VERSION, self.protocol_version, LOCALHOST_ADVERTISE_ADDR, port
+            GRPC_CORE_PROTOCOL_VERSION,
+            self.protocol_version,
+            LOCALHOST_ADVERTISE_ADDR,
+            service_port
         );
 
         log::info!(
@@ -124,30 +120,18 @@ impl Server {
             handshakestr
         );
 
-        log::info!(
-            "{} serve - Creating a GRPC Broker Server.",
-            LOG_PREFIX
-        );
+        log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
         let (broker_server, conn_info_sender) = grpc_broker::new_server().await;
-        log::info!(
-            "{} serve - Creating a GRPC Controller Server.",
-            LOG_PREFIX
-        );
+        log::info!("{} serve - Creating a GRPC Controller Server.", LOG_PREFIX);
         let controller_server = grpc_controller::new_server(trigger);
-        log::info!(
-            "{} serve - Creating a GRPC Stdio Server.",
-            LOG_PREFIX
-        );
+        log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
         let stdio_server = grpc_stdio::new_server();
 
         log::info!(
             "{} serve - All servers created. Spawning off a new task to serve them.",
             LOG_PREFIX
         );
-        log::info!(
-            "{}serve - Creating a broker service future.",
-            LOG_PREFIX
-        );
+        log::info!("{}serve - Creating a broker service future.", LOG_PREFIX);
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)
             .add_service(broker_server)
@@ -167,7 +151,11 @@ impl Server {
         //join!(broker_service_future, plugin_service_future);
         let result = grpc_service_future.await;
 
-        log::info!("{}gRPC broker service ended with result: {:?}", LOG_PREFIX, result);
+        log::info!(
+            "{}gRPC broker service ended with result: {:?}",
+            LOG_PREFIX,
+            result
+        );
 
         Ok(())
     }

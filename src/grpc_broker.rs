@@ -29,10 +29,11 @@ pub async fn new_server() -> (GrpcBrokerServer<GrpcBrokerImpl>, ConnInfoSender) 
     log::trace!("{} new_server - creating GrpcBrokerImpl.", LOG_PREFIX);
     let broker = GrpcBrokerImpl::new(outgoing_stream);
 
-    log::trace!("{} new_server - creating ConnInfoSender with Sender side of the stream.", LOG_PREFIX);
-    let conn_info_sender = ConnInfoSender {
-        tx,
-    };
+    log::trace!(
+        "{} new_server - creating ConnInfoSender with Sender side of the stream.",
+        LOG_PREFIX
+    );
+    let conn_info_sender = ConnInfoSender { tx };
 
     log::info!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
     (GrpcBrokerServer::new(broker), conn_info_sender)
