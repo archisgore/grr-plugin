@@ -28,6 +28,8 @@ prost = "0.9"
 prost-types = "0.9"
 async-stream = "0.3.2"
 triggered = "0.1.2"
+gag = "1.0"
+tokio-stream = "0.1.8"
 
 [dev-dependencies]
 assert_matches = "1.5.0"

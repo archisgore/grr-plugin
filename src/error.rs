@@ -3,6 +3,18 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use tonic::transport::Error as TonicError;
 
 #[macro_export]
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let name = type_name_of(f);
+        &name[..name.len() - 3]
+    }};
+}
+
+#[macro_export]
 macro_rules! log_and_escalate {
     ($e:expr) => {
         match $e {
@@ -16,15 +28,16 @@ macro_rules! log_and_escalate {
 }
 
 #[macro_export]
-macro_rules! function {
-    () => {{
-        fn f() {}
-        fn type_name_of<T>(_: T) -> &'static str {
-            std::any::type_name::<T>()
+macro_rules! log_and_escalate_status {
+    ($e:expr) => {
+        match $e {
+            Err(err) => {
+                log::error!("{},({}:{}), {:?}", function!(), file!(), line!(), err);
+                return Err(tonic::Status::unknown(format!("{:?}", err)));
+            }
+            Ok(o) => o,
         }
-        let name = type_name_of(f);
-        &name[..name.len() - 3]
-    }};
+    };
 }
 
 #[derive(Debug)]
