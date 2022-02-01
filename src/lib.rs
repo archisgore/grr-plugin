@@ -7,7 +7,7 @@ mod grpc_stdio;
 mod plugin;
 mod unique_port;
 
-pub use plugin::PluginServer;
+pub use plugin::{Plugin, PluginServer};
 
 use error::Error;
 use std::env;
