@@ -46,7 +46,7 @@ impl Body for RpcResponseBody {
     type Error = Status;
 
     fn poll_data(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
     ) -> Poll<Option<Result<<Self as http_body::Body>::Data, <Self as http_body::Body>::Error>>>
     {
@@ -57,7 +57,7 @@ impl Body for RpcResponseBody {
     }
 
     fn poll_trailers(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
     ) -> Poll<Result<Option<http::HeaderMap>, <Self as http_body::Body>::Error>> {
         match self.project() {
@@ -77,7 +77,7 @@ impl Body for StatusResponse {
 
     fn poll_data(
         mut self: Pin<&mut Self>,
-        ctx: &mut Context<'_>,
+        _ctx: &mut Context<'_>,
     ) -> Poll<Option<Result<<Self as http_body::Body>::Data, <Self as http_body::Body>::Error>>>
     {
         // take status out of self (since it can't be cloned)
@@ -92,7 +92,7 @@ impl Body for StatusResponse {
 
     fn poll_trailers(
         mut self: Pin<&mut Self>,
-        ctx: &mut Context<'_>,
+        _ctx: &mut Context<'_>,
     ) -> Poll<Result<Option<http::HeaderMap>, <Self as http_body::Body>::Error>> {
         // take status out of self (since it can't be cloned)
         let status = self.status.take();
@@ -116,7 +116,7 @@ impl Body for BodyWrapper {
     type Error = Status;
 
     fn poll_data(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
     ) -> Poll<Option<Result<<Self as http_body::Body>::Data, <Self as http_body::Body>::Error>>>
     {
@@ -131,7 +131,7 @@ impl Body for BodyWrapper {
     }
 
     fn poll_trailers(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         ctx: &mut Context<'_>,
     ) -> Poll<Result<Option<http::HeaderMap>, <Self as http_body::Body>::Error>> {
         self.project().body.as_mut().poll_trailers(ctx).map(|mpr| {
@@ -148,8 +148,8 @@ mod test {
 
     #[test]
     fn test_sendable() {
-        let sendable: Box<dyn Send> =
+        let _sendable: Box<dyn Send> =
             Box::new(RpcResponseBody::from_status(Status::unknown("foobar")));
-        let sendable: Box<dyn Send> = Box::new(RpcResponseBody::from_string("foobar".to_string()));
+        let _sendable: Box<dyn Send> = Box::new(RpcResponseBody::from_string("foobar".to_string()));
     }
 }

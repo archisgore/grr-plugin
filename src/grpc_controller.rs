@@ -3,12 +3,12 @@ pub mod grpc_plugins {
     tonic::include_proto!("plugin");
 }
 
-use async_stream::stream;
-use futures::stream::Stream;
+
+
 use grpc_plugins::grpc_controller_server::{GrpcController, GrpcControllerServer};
-use grpc_plugins::{ConnInfo, Empty};
+use grpc_plugins::{Empty};
 use tonic::transport::NamedService;
-use tonic::{async_trait, Request, Response, Status, Streaming};
+use tonic::{async_trait, Request, Response, Status};
 
 const LOG_PREFIX: &str = "GrrPlugin::GrpcController: ";
 
