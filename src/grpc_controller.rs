@@ -3,26 +3,19 @@ pub mod grpc_plugins {
     tonic::include_proto!("plugin");
 }
 
-
-
 use grpc_plugins::grpc_controller_server::{GrpcController, GrpcControllerServer};
-use grpc_plugins::{Empty};
-use tonic::transport::NamedService;
+use grpc_plugins::Empty;
 use tonic::{async_trait, Request, Response, Status};
 
 const LOG_PREFIX: &str = "GrrPlugin::GrpcController: ";
 
-pub fn new(trigger: triggered::Trigger) -> GrpcControllerServer<GrpcControllerImpl> {
+pub fn new_server(trigger: triggered::Trigger) -> GrpcControllerServer<GrpcControllerImpl> {
     GrpcControllerServer::new(GrpcControllerImpl { trigger })
 }
 
 #[derive(Clone)]
 pub struct GrpcControllerImpl {
     trigger: triggered::Trigger,
-}
-
-impl NamedService for GrpcControllerImpl {
-    const NAME: &'static str = "plugin.GRPCController";
 }
 
 #[async_trait]

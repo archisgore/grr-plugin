@@ -14,14 +14,13 @@ use std::io::Read;
 use std::pin::Pin;
 use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
-use tonic::transport::NamedService;
 use tonic::{async_trait, Request, Response, Status};
 
 const LOG_PREFIX: &str = "GrrPlugin::GrpcStdio: ";
 
 const CONSOLE_POLL_SLEEP_MILLIS: u64 = 500;
 
-pub fn new() -> GrpcStdioServer<GrpcStdioImpl> {
+pub fn new_server() -> GrpcStdioServer<GrpcStdioImpl> {
     GrpcStdioServer::new(GrpcStdioImpl {})
 }
 
@@ -78,10 +77,6 @@ impl GrpcStdioImpl {
             }
         }
     }
-}
-
-impl NamedService for GrpcStdioImpl {
-    const NAME: &'static str = "plugin.GRPCStdio";
 }
 
 #[async_trait]

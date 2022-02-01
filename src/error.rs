@@ -1,6 +1,9 @@
+use super::grpc_broker::grpc_plugins::ConnInfo;
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use tokio::sync::mpsc::error::SendError;
 use tonic::transport::Error as TonicError;
+use tonic::Status;
 
 #[macro_export]
 macro_rules! function {
@@ -48,6 +51,7 @@ pub enum Error {
     Generic(String),
     TonicTransport(TonicError),
     AddrParser(std::net::AddrParseError),
+    ConnInfoSend(SendError<Result<ConnInfo, Status>>),
 }
 
 impl Display for Error {
@@ -62,6 +66,7 @@ impl Display for Error {
             Self::Io(e) => write!(f, "Error with IO: {:?}", e),
             Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
             Self::AddrParser(e) => write!(f, "Error parsing string into a network address: {:?}", e),
+            Self::ConnInfoSend(e) => write!(f, "Error sending ConnInfo to the other side: {:?}", e),
         }
     }
 }
@@ -83,5 +88,11 @@ impl From<TonicError> for Error {
 impl From<std::net::AddrParseError> for Error {
     fn from(err: std::net::AddrParseError) -> Self {
         Self::AddrParser(err)
+    }
+}
+
+impl From<SendError<Result<ConnInfo, Status>>> for Error {
+    fn from(err: SendError<Result<ConnInfo, Status>>) -> Self {
+        Self::ConnInfoSend(err)
     }
 }
