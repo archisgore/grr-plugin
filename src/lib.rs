@@ -1,11 +1,15 @@
 // A go-plugin Server to write Rust-based plugins to Golang.
 
-mod error;
-mod controller;
 mod body;
+mod error;
 mod grpc_broker;
+mod grpc_controller;
+mod grpc_stdio;
 
 use error::Error;
+use grpc_broker::GrpcBrokerImpl;
+use grpc_controller::GrpcControllerImpl;
+use grpc_stdio::GrpcStdioImpl;
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
@@ -14,8 +18,6 @@ use std::marker::Send;
 use tonic::body::BoxBody;
 use tonic::transport::NamedService;
 use tower::Service;
-use controller::Controller;
-use grpc_broker::GrpcBroker;
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -73,7 +75,11 @@ impl Server {
 
     pub async fn serve<S>(&self, service: S) -> Result<(), Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>> + NamedService + Clone + Send + 'static,
+        S: Service<Request<Body>, Response = Response<BoxBody>>
+            + NamedService
+            + Clone
+            + Send
+            + 'static,
         <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -113,13 +119,15 @@ impl Server {
         println!("{}", handshakestr);
 
         log::info!("About to begin serving....");
+        let (trigger, listener) = triggered::trigger();
         log_and_escalate!(
             tonic::transport::Server::builder()
                 .add_service(health_service)
                 .add_service(service)
-                .add_service(Controller{})
-                .add_service(GrpcBroker{})
-                .serve(addr)
+                .add_service(grpc_broker::new())
+                .add_service(grpc_controller::new(trigger))
+                .add_service(grpc_stdio::new())
+                .serve_with_shutdown(addr, async { listener.await })
                 .await
         );
 

@@ -28,5 +28,7 @@ function grpcstdioproto() {
     echo "Updating the gRPC Broker protobuf definition from upstream Hashicorp go-plugin repo: $remote_path"
     wget ${remote_path}${proto_filename} -O ${local_path}${proto_filename} 
 }
+
 grpcbrokerproto
 grpccontrollerproto
+grpcstdioproto
