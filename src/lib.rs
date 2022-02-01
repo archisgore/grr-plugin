@@ -1,6 +1,9 @@
 // A go-plugin Server to write Rust-based plugins to Golang.
 
 mod error;
+mod controller;
+mod body;
+mod grpc_broker;
 
 use error::Error;
 use http::{Request, Response};
@@ -11,11 +14,8 @@ use std::marker::Send;
 use tonic::body::BoxBody;
 use tonic::transport::NamedService;
 use tower::Service;
-
-pub trait PluginService:
-    Service<Request<Body>, Response = Response<BoxBody>> + NamedService + Clone + Send + 'static
-{
-}
+use controller::Controller;
+use grpc_broker::GrpcBroker;
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -71,8 +71,9 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn serve<S: PluginService>(&self, service: S) -> Result<(), Error>
+    pub async fn serve<S>(&self, service: S) -> Result<(), Error>
     where
+        S: Service<Request<Body>, Response = Response<BoxBody>> + NamedService + Clone + Send + 'static,
         <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -116,6 +117,8 @@ impl Server {
             tonic::transport::Server::builder()
                 .add_service(health_service)
                 .add_service(service)
+                .add_service(Controller{})
+                .add_service(GrpcBroker{})
                 .serve(addr)
                 .await
         );

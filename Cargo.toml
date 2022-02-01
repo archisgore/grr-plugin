@@ -20,3 +20,13 @@ tempfile = "3.3"
 tower = "0.4"
 http = "0.2"
 hyper = "0.14"
+http-body = "0.4"
+bytes = "1.1.0"
+pin-project = "1.0"
+futures = "0.3.19"
+
+[dev-dependencies]
+assert_matches="1.5.0"
+
+[build-dependencies]
+tonic-build = "0.6"
