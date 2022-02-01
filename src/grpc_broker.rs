@@ -22,26 +22,17 @@ const LOG_PREFIX: &str = "GrrPlugin::GrpcBroker: ";
 
 pub async fn new_server() -> (GrpcBrokerServer<GrpcBrokerImpl>, ConnInfoSender) {
     log::info!("{} new_server - called.", LOG_PREFIX);
-    let broker = GrpcBrokerImpl::new();
 
-    log::trace!("{} new_server - created inner broker impl.", LOG_PREFIX);
-    let conn_info_sender = async {
-        log::trace!(
-            "{} new_server - acquiring a read lock on the broker's interior mutable state.",
-            LOG_PREFIX
-        );
-        let interior_read_guard = broker.interior.read().await;
-        let interior = interior_read_guard.deref();
+    log::trace!("{} new_server - creating outgoing stream.", LOG_PREFIX);
+    let (outgoing_stream, tx) = GrpcBrokerImpl::new_outgoing_stream();
 
-        log::trace!(
-            "{} new_server - cloning the broker's transmission channel so it can be sent to.",
-            LOG_PREFIX
-        );
-        ConnInfoSender {
-            tx: interior.tx.clone(),
-        }
-    }
-    .await;
+    log::trace!("{} new_server - creating GrpcBrokerImpl.", LOG_PREFIX);
+    let broker = GrpcBrokerImpl::new(outgoing_stream);
+
+    log::trace!("{} new_server - creating ConnInfoSender with Sender side of the stream.", LOG_PREFIX);
+    let conn_info_sender = ConnInfoSender {
+        tx,
+    };
 
     log::info!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
     (GrpcBrokerServer::new(broker), conn_info_sender)
@@ -65,7 +56,6 @@ impl ConnInfoSender {
 }
 
 struct GrpcBrokerInterior {
-    tx: UnboundedSender<Result<ConnInfo, Status>>,
     outgoing_stream: Option<<GrpcBrokerImpl as GrpcBroker>::StartStreamStream>,
 }
 
@@ -78,16 +68,13 @@ impl NamedService for GrpcBrokerImpl {
 }
 
 impl GrpcBrokerImpl {
-    pub fn new() -> GrpcBrokerImpl {
-        let (outgoing_stream, tx) = GrpcBrokerImpl::new_outgoing_stream();
-
+    pub fn new(outgoing_stream: <Self as GrpcBroker>::StartStreamStream) -> GrpcBrokerImpl {
         log::info!(
             "{} new - Creating a new GrpcBrokerImpl with interior mutability.",
             LOG_PREFIX
         );
         GrpcBrokerImpl {
             interior: RwLock::new(GrpcBrokerInterior {
-                tx,
                 outgoing_stream: Some(outgoing_stream),
             }),
         }
