@@ -116,4 +116,8 @@ impl JsonRpcServerBroker {
         *next_id += 1;
         service_id
     }
+
+    pub fn get_unused_port(&mut self) -> Option<u16> {
+        self.unique_port.get_unused_port()
+    }
 }

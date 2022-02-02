@@ -9,7 +9,6 @@ mod unique_port;
 
 pub use error::Error;
 
-use futures::Future;
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
@@ -23,7 +22,7 @@ pub use grpc_broker::grpc_plugins::ConnInfo;
 pub use json_rpc_server::JsonRpcServerBroker;
 pub use tonic::Status;
 
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -46,14 +45,48 @@ pub struct HandshakeConfig {
 pub struct Server {
     handshake_config: HandshakeConfig,
     protocol_version: u32,
+    rx: Option<UnboundedReceiver<Result<ConnInfo, Status>>>,
+    jsonrpc_broker: Option<JsonRpcServerBroker>,
+    service_port: u16,
 }
 
 impl Server {
-    pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Server {
-        Server {
+    pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Result<Server, Error> {
+        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
+        let unique_ports = unique_port::UniquePort::new();
+
+        // create the JSON-RPC 2.0 server broker
+        log::info!(
+            "{}new -  Creating the JSON RPC 2.0 Server Broker.",
+            LOG_PREFIX
+        );
+        let mut jsonrpc_broker =
+            JsonRpcServerBroker::new(unique_ports, LOCALHOST_BIND_ADDR.to_string(), tx);
+
+        log::info!("{}new -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);
+
+        let service_port = match jsonrpc_broker.get_unused_port() {
+            Some(p) => p,
+            None => {
+                return Err(Error::Generic(
+                    "Unable to find a free unused TCP port to bind the gRPC server to".to_string(),
+                ));
+            }
+        };
+
+        log::info!("{}new - picked broker port: {}", LOG_PREFIX, service_port);
+
+        Ok(Server {
             handshake_config,
             protocol_version,
-        }
+            jsonrpc_broker: Some(jsonrpc_broker),
+            rx: Some(rx),
+            service_port,
+        })
+    }
+
+    pub fn extract_jsonrpc_broker(&mut self) -> Option<JsonRpcServerBroker> {
+        self.jsonrpc_broker.take()
     }
 
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
@@ -79,7 +112,7 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn serve<S>(&mut self, plugin: S) -> Result<(impl Future, JsonRpcServerBroker), Error>
+    pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
     where
         S: Service<Request<Body>, Response = Response<BoxBody>>
             + NamedService
@@ -94,40 +127,13 @@ impl Server {
 
         log_and_escalate!(self.validate_magic_cookie());
 
-        let mut unique_ports = unique_port::UniquePort::new();
-
         let (trigger, listener) = triggered::trigger();
-
-        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
-
-        let service_port = match unique_ports.get_unused_port() {
-            Some(p) => p,
-            None => {
-                return Err(Error::Generic(
-                    "Unable to find a free unused TCP port to bind the gRPC server to".to_string(),
-                ));
-            }
-        };
-
-        // create the JSON-RPC 2.0 server broker
-        log::info!(
-            "{}serve -  Creating the JSON RPC 2.0 Server Broker.",
-            LOG_PREFIX
-        );
-        let jsonrpc_broker = json_rpc_server::JsonRpcServerBroker::new(
-            unique_ports,
-            LOCALHOST_BIND_ADDR.to_string(),
-            tx,
-        );
-        log::info!("{}serve -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);
 
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<S>().await;
         log::info!("{}serve -  gRPC Health Service created.", LOG_PREFIX);
 
-        log::info!("{}serve - picked broker port: {}", LOG_PREFIX, service_port);
-
-        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
+        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, self.service_port);
         let addr = log_and_escalate!(addrstr.parse());
 
         let handshakestr = format!(
@@ -135,7 +141,7 @@ impl Server {
             GRPC_CORE_PROTOCOL_VERSION,
             self.protocol_version,
             LOCALHOST_ADVERTISE_ADDR,
-            service_port
+            self.service_port
         );
 
         log::info!(
@@ -143,6 +149,11 @@ impl Server {
             LOG_PREFIX,
             handshakestr
         );
+
+        let rx = match self.rx.take() {
+            Some(rx) => rx,
+            None => return Err(Error::ConnInfoReceiverMissing),
+        };
 
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
         let broker_server = grpc_broker::new_server(rx).await;
@@ -164,25 +175,23 @@ impl Server {
             .add_service(plugin)
             .serve_with_shutdown(addr, async { listener.await });
 
-        let service_future = async move {
-            log::info!(
-                "{}About to print handshake string: {}",
-                LOG_PREFIX,
-                handshakestr
-            );
-            println!("{}", handshakestr);
+        log::info!(
+            "{}About to print handshake string: {}",
+            LOG_PREFIX,
+            handshakestr
+        );
+        println!("{}", handshakestr);
 
-            // starting broker and plugin services now...
-            //join!(broker_service_future, plugin_service_future);
-            let result = grpc_service_future.await;
+        // starting broker and plugin services now...
+        //join!(broker_service_future, plugin_service_future);
+        let result = grpc_service_future.await;
 
-            log::info!(
-                "{}gRPC broker service ended with result: {:?}",
-                LOG_PREFIX,
-                result
-            );
-        };
+        log::info!(
+            "{}gRPC broker service ended with result: {:?}",
+            LOG_PREFIX,
+            result
+        );
 
-        Ok((service_future, jsonrpc_broker))
+        Ok(())
     }
 }
