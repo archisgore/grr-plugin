@@ -4,7 +4,7 @@ mod error;
 mod grpc_broker;
 mod grpc_controller;
 mod grpc_stdio;
-mod json_rpc_server;
+mod json_rpc_broker;
 mod unique_port;
 
 pub use error::Error;
@@ -19,10 +19,10 @@ use tonic::transport::NamedService;
 use tower::Service;
 
 pub use grpc_broker::grpc_plugins::ConnInfo;
-pub use json_rpc_server::JsonRpcServerBroker;
-pub use tonic::Status;
+pub use json_rpc_broker::JsonRpcBroker;
+pub use tonic::{Status, Streaming};
 
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -45,48 +45,86 @@ pub struct HandshakeConfig {
 pub struct Server {
     handshake_config: HandshakeConfig,
     protocol_version: u32,
-    rx: Option<UnboundedReceiver<Result<ConnInfo, Status>>>,
-    jsonrpc_broker: Option<JsonRpcServerBroker>,
-    service_port: u16,
+    outgoing_conninfo_sender_receiver: UnboundedReceiver<UnboundedSender<Result<ConnInfo, Status>>>,
+    outgoing_conninfo_receiver_receiver:
+        UnboundedReceiver<UnboundedReceiver<Result<ConnInfo, Status>>>,
+    incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
+    incoming_conninfo_stream_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
 }
 
 impl Server {
     pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Result<Server, Error> {
-        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
-        let unique_ports = unique_port::UniquePort::new();
+        // This channel sends conninfo from the plugin/server side (the sender will be vended to the JsonRPCBroker who will send new
+        // ConnInfo's as new services/handlers are launched) to the host/client side (through the gRPCBroker's start_stream call)
+        // where the host/client will process them
+        let (outgoing_conninfo_sender, outgoing_conninfo_receiver) =
+            unbounded_channel::<Result<ConnInfo, Status>>();
+
+        // Use this channel to send the channel transmitter above from this constructor
+        // to where it will be consumed in the "jsonrpc_broker" method later...
+        // using channels avoids having to do a complex sync dance using mutable globals.
+        let (outgoing_conninfo_sender_transmitter, outgoing_conninfo_sender_receiver) =
+            unbounded_channel();
+        log_and_escalate!(outgoing_conninfo_sender_transmitter.send(outgoing_conninfo_sender));
+
+        // Use this channel to send the channel receiver above from this constructor
+        // to where it will be consumed in the "serve" method later...
+        // using channels avoids having to do a complex sync dance using mutable globals.
+        let (outgoing_conninfo_receiver_transmitter, outgoing_conninfo_receiver_receiver) =
+            unbounded_channel();
+        log_and_escalate!(outgoing_conninfo_receiver_transmitter.send(outgoing_conninfo_receiver));
+
+        // Use this channel to send the channel from where we will receive ConnInfo's coming inbound
+        // from the host, to the broker which will know what to do with them
+        // This channel/stream of ConnInfo's will be received from the GRPCBroker in the start_stream call
+        // and will be sent from there to the JsonRPCBroker who will broker the ConnInfo's towards the host.
+        let (incoming_conninfo_stream_sender, incoming_conninfo_stream_receiver) =
+            unbounded_channel();
+
+        Ok(Server {
+            handshake_config,
+            protocol_version,
+            outgoing_conninfo_sender_receiver,
+            outgoing_conninfo_receiver_receiver,
+            incoming_conninfo_stream_sender,
+            incoming_conninfo_stream_receiver,
+        })
+    }
+
+    pub async fn jsonrpc_server_broker(&mut self) -> Result<JsonRpcBroker, Error> {
+        let outgoing_conninfo_sender = match self.outgoing_conninfo_sender_receiver.recv().await {
+            None => {
+                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
+                log::error!("{}", errmsg);
+                return Err(Error::Generic(errmsg));
+            }
+            Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
+        };
+
+        let incoming_conninfo_stream = match self.incoming_conninfo_stream_receiver.recv().await {
+            None => {
+                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's incoming stream of ConnInfo was None, which, should have been sent by the GRPCBroker during the start_stream call.", LOG_PREFIX);
+                log::error!("{}", errmsg);
+                return Err(Error::Generic(errmsg));
+            }
+            Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
+        };
 
         // create the JSON-RPC 2.0 server broker
         log::info!(
             "{}new -  Creating the JSON RPC 2.0 Server Broker.",
             LOG_PREFIX
         );
-        let mut jsonrpc_broker =
-            JsonRpcServerBroker::new(unique_ports, LOCALHOST_BIND_ADDR.to_string(), tx);
+        let jsonrpc_broker = JsonRpcBroker::new(
+            unique_port::UniquePort::new(),
+            LOCALHOST_BIND_ADDR.to_string(),
+            LOCALHOST_ADVERTISE_ADDR.to_string(),
+            outgoing_conninfo_sender,
+        );
 
         log::info!("{}new -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);
 
-        let service_port = match jsonrpc_broker.get_unused_port() {
-            Some(p) => p,
-            None => {
-                return Err(Error::Generic(
-                    "Unable to find a free unused TCP port to bind the gRPC server to".to_string(),
-                ));
-            }
-        };
-
-        log::info!("{}new - picked broker port: {}", LOG_PREFIX, service_port);
-
-        Ok(Server {
-            handshake_config,
-            protocol_version,
-            jsonrpc_broker: Some(jsonrpc_broker),
-            rx: Some(rx),
-            service_port,
-        })
-    }
-
-    pub fn extract_jsonrpc_broker(&mut self) -> Option<JsonRpcServerBroker> {
-        self.jsonrpc_broker.take()
+        Ok(jsonrpc_broker)
     }
 
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
@@ -133,7 +171,18 @@ impl Server {
         health_reporter.set_serving::<S>().await;
         log::info!("{}serve -  gRPC Health Service created.", LOG_PREFIX);
 
-        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, self.service_port);
+        let service_port = match unique_port::UniquePort::new().get_unused_port() {
+            Some(p) => p,
+            None => {
+                return Err(Error::Generic(
+                    "Unable to find a free unused TCP port to bind the gRPC server to".to_string(),
+                ));
+            }
+        };
+
+        log::info!("{}new - picked broker port: {}", LOG_PREFIX, service_port);
+
+        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
         let addr = log_and_escalate!(addrstr.parse());
 
         let handshakestr = format!(
@@ -141,7 +190,7 @@ impl Server {
             GRPC_CORE_PROTOCOL_VERSION,
             self.protocol_version,
             LOCALHOST_ADVERTISE_ADDR,
-            self.service_port
+            service_port
         );
 
         log::info!(
@@ -150,23 +199,26 @@ impl Server {
             handshakestr
         );
 
-        let rx = match self.rx.take() {
-            Some(rx) => rx,
-            None => return Err(Error::ConnInfoReceiverMissing),
+        let outgoing_conninfo_receiver = match self.outgoing_conninfo_receiver_receiver.recv().await {
+            Some(outgoing_conninfo_receiver) => outgoing_conninfo_receiver,
+            None => return Err(Error::Generic("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method.".to_string())),
         };
 
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
-        let broker_server = grpc_broker::new_server(rx).await;
+        // mspc Senders can be cloned. Receivers need all the attention and queueing.
+        let broker_server = grpc_broker::new_server(
+            outgoing_conninfo_receiver,
+            self.incoming_conninfo_stream_sender.clone(),
+        )
+        .await?;
+
         log::info!("{} serve - Creating a GRPC Controller Server.", LOG_PREFIX);
         let controller_server = grpc_controller::new_server(trigger);
         log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
         let stdio_server = grpc_stdio::new_server();
 
-        log::info!(
-            "{} serve - All servers created. Spawning off a new task to serve them.",
-            LOG_PREFIX
-        );
-        log::info!("{}serve - Creating a broker service future.", LOG_PREFIX);
+        log::info!("{} serve - All servers created.", LOG_PREFIX);
+        log::info!("{}serve - Starting service...", LOG_PREFIX);
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)
             .add_service(broker_server)

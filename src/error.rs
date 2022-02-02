@@ -1,7 +1,11 @@
 use super::grpc_broker::grpc_plugins::ConnInfo;
 use std::error::Error as StdError;
+use std::fmt::Debug;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::pin::Pin;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_stream::Stream;
 use tonic::transport::Error as TonicError;
 use tonic::Status;
 
@@ -47,12 +51,11 @@ macro_rules! log_and_escalate_status {
 pub enum Error {
     NoTCPPortAvailable,
     GRPCHandshakeMagicCookieValueMismatch,
-    ConnInfoReceiverMissing,
     Io(std::io::Error),
     Generic(String),
     TonicTransport(TonicError),
     AddrParser(std::net::AddrParseError),
-    ConnInfoSend(SendError<Result<ConnInfo, Status>>),
+    Send(String),
 }
 
 impl Display for Error {
@@ -63,12 +66,11 @@ impl Display for Error {
                 "No ports were available to bind the plugin's gRPC server to."
             ),
             Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
-            Self::ConnInfoReceiverMissing => write!(f, "In GRPC Plugin Server conn_info_receiver was None, when it shouldn't be, as it is set to Some in the constructor and used in the blocking serve method. Something really weird has happened here."),
             Self::Generic(s) => write!(f, "{}", s),
             Self::Io(e) => write!(f, "Error with IO: {:?}", e),
             Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
             Self::AddrParser(e) => write!(f, "Error parsing string into a network address: {:?}", e),
-            Self::ConnInfoSend(e) => write!(f, "Error sending ConnInfo to the other side: {:?}", e),
+            Self::Send(s) => write!(f, "Error sending on a mpsc channel: {}", s),
         }
     }
 }
@@ -93,8 +95,11 @@ impl From<std::net::AddrParseError> for Error {
     }
 }
 
-impl From<SendError<Result<ConnInfo, Status>>> for Error {
-    fn from(err: SendError<Result<ConnInfo, Status>>) -> Self {
-        Self::ConnInfoSend(err)
+impl<T> From<SendError<T>> for Error {
+    fn from(err: SendError<T>) -> Self {
+        Self::Send(format!(
+            "unable to send {} on a mpsc channel",
+            std::any::type_name::<T>()
+        ))
     }
 }

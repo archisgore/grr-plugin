@@ -5,14 +5,15 @@ pub mod grpc_plugins {
 
 pub use grpc_plugins::ConnInfo;
 
+use super::Error;
+use crate::{function, log_and_escalate_status};
 use async_stream::stream;
 use futures::stream::Stream;
 use grpc_plugins::grpc_broker_server::{GrpcBroker, GrpcBrokerServer};
 use std::ops::DerefMut;
 use std::pin::Pin;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
-use tokio_stream::StreamExt;
 use tonic::transport::NamedService;
 use tonic::{async_trait, Request, Response, Status, Streaming};
 
@@ -20,26 +21,22 @@ const LOG_PREFIX: &str = "GrrPlugin::GrpcBroker: ";
 
 pub async fn new_server(
     conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
-) -> GrpcBrokerServer<GrpcBrokerImpl> {
+    incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
+) -> Result<GrpcBrokerServer<GrpcBrokerImpl>, Error> {
     log::info!("{} new_server - called.", LOG_PREFIX);
 
-    log::trace!("{} new_server - creating outgoing stream.", LOG_PREFIX);
-    let outgoing_stream = GrpcBrokerImpl::new_outgoing_stream(conn_info_receiver);
-
     log::trace!("{} new_server - creating GrpcBrokerImpl.", LOG_PREFIX);
-    let broker = GrpcBrokerImpl::new(outgoing_stream);
-
-    log::trace!(
-        "{} new_server - creating ConnInfoSender with Sender side of the stream.",
-        LOG_PREFIX
-    );
+    let broker = GrpcBrokerImpl::new(conn_info_receiver, incoming_conninfo_stream_sender)?;
 
     log::info!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
-    GrpcBrokerServer::new(broker)
+    Ok(GrpcBrokerServer::new(broker))
 }
 
 struct GrpcBrokerInterior {
-    outgoing_stream: Option<<GrpcBrokerImpl as GrpcBroker>::StartStreamStream>,
+    // This is how the outgoing stream will be pulled by consumer
+    outgoing_conninfo_receiver_receiver:
+        UnboundedReceiver<<GrpcBrokerImpl as GrpcBroker>::StartStreamStream>,
+    incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
 }
 
 pub struct GrpcBrokerImpl {
@@ -51,16 +48,35 @@ impl NamedService for GrpcBrokerImpl {
 }
 
 impl GrpcBrokerImpl {
-    pub fn new(outgoing_stream: <Self as GrpcBroker>::StartStreamStream) -> GrpcBrokerImpl {
-        log::info!(
-            "{} new - Creating a new GrpcBrokerImpl with interior mutability.",
+    pub fn new(
+        conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
+        incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
+    ) -> Result<GrpcBrokerImpl, Error> {
+        log::info!("{} GrpcBrokerImpl::new - called.", LOG_PREFIX);
+
+        log::trace!(
+            "{} GrpcBrokerImpl::new - creating outgoing stream.",
             LOG_PREFIX
         );
-        GrpcBrokerImpl {
+        let outgoing_stream = Self::new_outgoing_stream(conn_info_receiver);
+
+        // we use a channel to provide one-way send between the constructor where we have this outgoing stream,
+        // and a gRPC method stream_start where it will be consumed.
+        log::trace!("{} GrpcBrokerImpl::new - sending outgoing stream to an inner stream from which it can be pulled later...", LOG_PREFIX);
+        let (outgoing_conninfo_receiver_transmitter, outgoing_conninfo_receiver_receiver) =
+            unbounded_channel();
+        outgoing_conninfo_receiver_transmitter.send(outgoing_stream)?;
+
+        log::info!(
+            "{} GrpcBrokerImpl::new - Creating a new GrpcBrokerImpl with interior mutability.",
+            LOG_PREFIX
+        );
+        Ok(GrpcBrokerImpl {
             interior: RwLock::new(GrpcBrokerInterior {
-                outgoing_stream: Some(outgoing_stream),
+                outgoing_conninfo_receiver_receiver,
+                incoming_conninfo_stream_sender,
             }),
-        }
+        })
     }
 
     fn new_outgoing_stream(
@@ -92,32 +108,6 @@ impl GrpcBrokerImpl {
         log::info!("{} outgoing stream created and returning...", LOG_PREFIX);
         dyn_stream
     }
-
-    // This function will run forever. tokio::spawn this!
-    async fn blocking_incoming_conn(mut stream: Streaming<ConnInfo>) {
-        log::info!(
-            "{}blocking_incoming_conn - perpetually listening for incoming ConnInfo's",
-            LOG_PREFIX
-        );
-        while let Some(conn_info_result) = stream.next().await {
-            match conn_info_result {
-                Err(e) => {
-                    log::error!(
-                        "{}blocking_incoming_conn - an error occurred reading from the stream: {:?}",
-                        LOG_PREFIX,
-                        e
-                    );
-                    break; //out of the while loop
-                }
-                Ok(conn_info) => log::info!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info),
-            }
-        }
-
-        log::info!(
-            "{}blocking_incoming_conn - exiting due to stream returning None or an error",
-            LOG_PREFIX
-        );
-    }
 }
 
 #[async_trait]
@@ -134,20 +124,20 @@ impl GrpcBroker for GrpcBrokerImpl {
         let mut interior_write_guard = self.interior.write().await;
         let interior = interior_write_guard.deref_mut();
 
-        let mos = interior.outgoing_stream.take();
-        match mos {
+        match interior.outgoing_conninfo_receiver_receiver.recv().await {
             None => {
-                log::error!("{} start_stream - outgoing_stream was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .take() it?", LOG_PREFIX);
-                Err(Status::unknown("outgoing_stream was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .take() it?"))
+                let errmsg = format!("{} start_stream - outgoing_stream was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .take() it?", LOG_PREFIX);
+                log::error!("{}", errmsg);
+                Err(Status::unknown(errmsg))
             }
             Some(os) => {
                 log::info!(
-                    "{} spawning perpetual process to process incoming ConnInfo's...",
+                    "{} start_stream - sending the Stream of incoming ConnInfo to someone else to broker...",
                     LOG_PREFIX
                 );
-                tokio::spawn(async move {
-                    GrpcBrokerImpl::blocking_incoming_conn(req.into_inner()).await
-                });
+                log_and_escalate_status!(interior
+                    .incoming_conninfo_stream_sender
+                    .send(req.into_inner()));
 
                 Ok(Response::new(os))
             }
