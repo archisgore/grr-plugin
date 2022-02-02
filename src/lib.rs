@@ -4,10 +4,12 @@ mod error;
 mod grpc_broker;
 mod grpc_controller;
 mod grpc_stdio;
+mod json_rpc_server;
 mod unique_port;
 
 pub use error::Error;
 
+use futures::Future;
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
@@ -18,9 +20,10 @@ use tonic::transport::NamedService;
 use tower::Service;
 
 pub use grpc_broker::grpc_plugins::ConnInfo;
+pub use json_rpc_server::JsonRpcServerBroker;
 pub use tonic::Status;
 
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::unbounded_channel;
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -43,24 +46,14 @@ pub struct HandshakeConfig {
 pub struct Server {
     handshake_config: HandshakeConfig,
     protocol_version: u32,
-    conn_info_sender: UnboundedSender<Result<ConnInfo, Status>>,
-    // Option allows us to take out of the reference.
-    conn_info_receiver: Option<UnboundedReceiver<Result<ConnInfo, Status>>>,
 }
 
 impl Server {
     pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Server {
-        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
         Server {
             handshake_config,
             protocol_version,
-            conn_info_sender: tx,
-            conn_info_receiver: Some(rx),
         }
-    }
-
-    pub fn get_conn_info_sender(&self) -> UnboundedSender<Result<ConnInfo, Status>> {
-        self.conn_info_sender.clone()
     }
 
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
@@ -86,7 +79,7 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
+    pub async fn serve<S>(&mut self, plugin: S) -> Result<(impl Future, JsonRpcServerBroker), Error>
     where
         S: Service<Request<Body>, Response = Response<BoxBody>>
             + NamedService
@@ -105,6 +98,8 @@ impl Server {
 
         let (trigger, listener) = triggered::trigger();
 
+        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
+
         let service_port = match unique_ports.get_unused_port() {
             Some(p) => p,
             None => {
@@ -113,6 +108,18 @@ impl Server {
                 ));
             }
         };
+
+        // create the JSON-RPC 2.0 server broker
+        log::info!(
+            "{}serve -  Creating the JSON RPC 2.0 Server Broker.",
+            LOG_PREFIX
+        );
+        let jsonrpc_broker = json_rpc_server::JsonRpcServerBroker::new(
+            unique_ports,
+            LOCALHOST_BIND_ADDR.to_string(),
+            tx,
+        );
+        log::info!("{}serve -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);
 
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<S>().await;
@@ -137,14 +144,8 @@ impl Server {
             handshakestr
         );
 
-        // take conn_info_receiver from plugin
-        let cir = match self.conn_info_receiver.take() {
-            Some(cir) => cir,
-            None => return Err(Error::ConnInfoReceiverMissing),
-        };
-
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
-        let broker_server = grpc_broker::new_server(cir).await;
+        let broker_server = grpc_broker::new_server(rx).await;
         log::info!("{} serve - Creating a GRPC Controller Server.", LOG_PREFIX);
         let controller_server = grpc_controller::new_server(trigger);
         log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
@@ -163,23 +164,25 @@ impl Server {
             .add_service(plugin)
             .serve_with_shutdown(addr, async { listener.await });
 
-        log::info!(
-            "{}About to print handshake string: {}",
-            LOG_PREFIX,
-            handshakestr
-        );
-        println!("{}", handshakestr);
+        let service_future = async move {
+            log::info!(
+                "{}About to print handshake string: {}",
+                LOG_PREFIX,
+                handshakestr
+            );
+            println!("{}", handshakestr);
 
-        // starting broker and plugin services now...
-        //join!(broker_service_future, plugin_service_future);
-        let result = grpc_service_future.await;
+            // starting broker and plugin services now...
+            //join!(broker_service_future, plugin_service_future);
+            let result = grpc_service_future.await;
 
-        log::info!(
-            "{}gRPC broker service ended with result: {:?}",
-            LOG_PREFIX,
-            result
-        );
+            log::info!(
+                "{}gRPC broker service ended with result: {:?}",
+                LOG_PREFIX,
+                result
+            );
+        };
 
-        Ok(())
+        Ok((service_future, jsonrpc_broker))
     }
 }
