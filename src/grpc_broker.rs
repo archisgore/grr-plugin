@@ -5,14 +5,12 @@ pub mod grpc_plugins {
 
 pub use grpc_plugins::ConnInfo;
 
-use super::error::Error;
-use crate::{function, log_and_escalate};
 use async_stream::stream;
 use futures::stream::Stream;
 use grpc_plugins::grpc_broker_server::{GrpcBroker, GrpcBrokerServer};
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use std::pin::Pin;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tonic::transport::NamedService;
@@ -20,11 +18,13 @@ use tonic::{async_trait, Request, Response, Status, Streaming};
 
 const LOG_PREFIX: &str = "GrrPlugin::GrpcBroker: ";
 
-pub async fn new_server() -> (GrpcBrokerServer<GrpcBrokerImpl>, ConnInfoSender) {
+pub async fn new_server(
+    conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
+) -> GrpcBrokerServer<GrpcBrokerImpl> {
     log::info!("{} new_server - called.", LOG_PREFIX);
 
     log::trace!("{} new_server - creating outgoing stream.", LOG_PREFIX);
-    let (outgoing_stream, tx) = GrpcBrokerImpl::new_outgoing_stream();
+    let outgoing_stream = GrpcBrokerImpl::new_outgoing_stream(conn_info_receiver);
 
     log::trace!("{} new_server - creating GrpcBrokerImpl.", LOG_PREFIX);
     let broker = GrpcBrokerImpl::new(outgoing_stream);
@@ -33,27 +33,9 @@ pub async fn new_server() -> (GrpcBrokerServer<GrpcBrokerImpl>, ConnInfoSender) 
         "{} new_server - creating ConnInfoSender with Sender side of the stream.",
         LOG_PREFIX
     );
-    let conn_info_sender = ConnInfoSender { tx };
 
     log::info!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
-    (GrpcBrokerServer::new(broker), conn_info_sender)
-}
-
-#[derive(Clone)]
-pub struct ConnInfoSender {
-    tx: UnboundedSender<Result<ConnInfo, Status>>,
-}
-
-impl ConnInfoSender {
-    pub async fn send(&mut self, ci: ConnInfo) -> Result<(), Error> {
-        log::info!("{} ConnInfoSender::send - called.", LOG_PREFIX);
-        log::trace!(
-            "{} ConnInfoSender::send - called for ConnInfo: {:?}.",
-            LOG_PREFIX,
-            ci
-        );
-        Ok(log_and_escalate!(self.tx.send(Ok(ci))))
-    }
+    GrpcBrokerServer::new(broker)
 }
 
 struct GrpcBrokerInterior {
@@ -81,18 +63,16 @@ impl GrpcBrokerImpl {
         }
     }
 
-    fn new_outgoing_stream() -> (
-        <Self as GrpcBroker>::StartStreamStream,
-        UnboundedSender<Result<ConnInfo, Status>>,
-    ) {
+    fn new_outgoing_stream(
+        mut conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
+    ) -> <Self as GrpcBroker>::StartStreamStream {
         log::info!("{} new_outgoing_stream called.", LOG_PREFIX);
-        let (tx, mut rx) = unbounded_channel::<Result<ConnInfo, Status>>();
 
         let s = stream! {
             log::info!("{} outgoing_stream repeater initialized.", LOG_PREFIX);
             loop {
                 log::info!("{} outgoing_stream loop iteration", LOG_PREFIX);
-                match rx.recv().await {
+                match conn_info_receiver.recv().await {
                     Some(result) => {
                         log::info!("{} Sending Result<ConnInfo> to outgoing_stream: {:?}.", LOG_PREFIX, result);
                         yield result
@@ -110,7 +90,7 @@ impl GrpcBrokerImpl {
         > = Box::pin(s);
 
         log::info!("{} outgoing stream created and returning...", LOG_PREFIX);
-        (dyn_stream, tx)
+        dyn_stream
     }
 
     // This function will run forever. tokio::spawn this!

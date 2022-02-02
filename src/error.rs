@@ -47,6 +47,7 @@ macro_rules! log_and_escalate_status {
 pub enum Error {
     NoTCPPortAvailable,
     GRPCHandshakeMagicCookieValueMismatch,
+    ConnInfoReceiverMissing,
     Io(std::io::Error),
     Generic(String),
     TonicTransport(TonicError),
@@ -62,6 +63,7 @@ impl Display for Error {
                 "No ports were available to bind the plugin's gRPC server to."
             ),
             Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
+            Self::ConnInfoReceiverMissing => write!(f, "In GRPC Plugin Server conn_info_receiver was None, when it shouldn't be, as it is set to Some in the constructor and used in the blocking serve method. Something really weird has happened here."),
             Self::Generic(s) => write!(f, "{}", s),
             Self::Io(e) => write!(f, "Error with IO: {:?}", e),
             Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),

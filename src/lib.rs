@@ -4,15 +4,23 @@ mod error;
 mod grpc_broker;
 mod grpc_controller;
 mod grpc_stdio;
-mod plugin;
 mod unique_port;
 
-pub use plugin::{Plugin, PluginServer};
+pub use error::Error;
 
-use error::Error;
+use http::{Request, Response};
+use hyper::Body;
+use std::clone::Clone;
 use std::env;
 use std::marker::Send;
+use tonic::body::BoxBody;
+use tonic::transport::NamedService;
 use tower::Service;
+
+pub use grpc_broker::grpc_plugins::ConnInfo;
+pub use tonic::Status;
+
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
@@ -35,14 +43,24 @@ pub struct HandshakeConfig {
 pub struct Server {
     handshake_config: HandshakeConfig,
     protocol_version: u32,
+    conn_info_sender: UnboundedSender<Result<ConnInfo, Status>>,
+    // Option allows us to take out of the reference.
+    conn_info_receiver: Option<UnboundedReceiver<Result<ConnInfo, Status>>>,
 }
 
 impl Server {
     pub fn new(protocol_version: u32, handshake_config: HandshakeConfig) -> Server {
+        let (tx, rx) = unbounded_channel::<Result<ConnInfo, Status>>();
         Server {
             handshake_config,
             protocol_version,
+            conn_info_sender: tx,
+            conn_info_receiver: Some(rx),
         }
+    }
+
+    pub fn get_conn_info_sender(&self) -> UnboundedSender<Result<ConnInfo, Status>> {
+        self.conn_info_sender.clone()
     }
 
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
@@ -68,8 +86,13 @@ impl Server {
         Err(Error::GRPCHandshakeMagicCookieValueMismatch)
     }
 
-    pub async fn serve<S: PluginServer>(&self, plugin: S) -> Result<(), Error>
+    pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
     where
+        S: Service<Request<Body>, Response = Response<BoxBody>>
+            + NamedService
+            + Clone
+            + Send
+            + 'static,
         <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
@@ -114,8 +137,14 @@ impl Server {
             handshakestr
         );
 
+        // take conn_info_receiver from plugin
+        let cir = match self.conn_info_receiver.take() {
+            Some(cir) => cir,
+            None => return Err(Error::ConnInfoReceiverMissing),
+        };
+
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
-        let (broker_server, conn_info_sender) = grpc_broker::new_server().await;
+        let broker_server = grpc_broker::new_server(cir).await;
         log::info!("{} serve - Creating a GRPC Controller Server.", LOG_PREFIX);
         let controller_server = grpc_controller::new_server(trigger);
         log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
