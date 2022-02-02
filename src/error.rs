@@ -1,13 +1,13 @@
-use super::grpc_broker::grpc_plugins::ConnInfo;
+
 use std::error::Error as StdError;
 use std::fmt::Debug;
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::pin::Pin;
+
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio_stream::Stream;
+
+
 use tonic::transport::Error as TonicError;
-use tonic::Status;
+
 
 #[macro_export]
 macro_rules! function {
@@ -96,7 +96,7 @@ impl From<std::net::AddrParseError> for Error {
 }
 
 impl<T> From<SendError<T>> for Error {
-    fn from(err: SendError<T>) -> Self {
+    fn from(_err: SendError<T>) -> Self {
         Self::Send(format!(
             "unable to send {} on a mpsc channel",
             std::any::type_name::<T>()

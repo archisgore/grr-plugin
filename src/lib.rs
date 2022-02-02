@@ -101,7 +101,7 @@ impl Server {
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
 
-        let incoming_conninfo_stream = match self.incoming_conninfo_stream_receiver.recv().await {
+        let _incoming_conninfo_stream = match self.incoming_conninfo_stream_receiver.recv().await {
             None => {
                 let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's incoming stream of ConnInfo was None, which, should have been sent by the GRPCBroker during the start_stream call.", LOG_PREFIX);
                 log::error!("{}", errmsg);
