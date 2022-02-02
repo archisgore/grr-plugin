@@ -11,10 +11,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tonic::Streaming;
+use futures::stream::StreamExt;
 
 const LOG_PREFIX: &str = "JsonRpcServer:: ";
 
-type ServerId = u32;
+type ServiceId = u32;
 
 pub struct JsonRpcBroker {
     unique_port: UniquePort,
@@ -30,7 +32,7 @@ pub struct JsonRpcBroker {
     outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
 
     // Services on the host-side that we've been informed of
-    host_services: Arc<RwLock<HashMap<ServerId, ConnInfo>>>,
+    host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>,
 }
 
 impl JsonRpcBroker {
@@ -39,18 +41,29 @@ impl JsonRpcBroker {
         bind_ip: String,
         advertise_ip: String,
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
+        incoming_conninfo_stream: Streaming<ConnInfo>,
     ) -> Self {
+        log::info!("{} - new - called", LOG_PREFIX);
+        let host_services = Arc::new(RwLock::new(HashMap::new()));
+
+        log::info!("{} - new - spawning a process to receive incoming ConnInfo's from host side...", LOG_PREFIX);
+        let host_services_for_closure = host_services.clone();
+        tokio::spawn(async move {
+            log::info!("{} - new - Inside spawn'd process. Calling a blocking listener.", LOG_PREFIX);
+            Self::blocking_incoming_conn(incoming_conninfo_stream, host_services_for_closure).await
+        });
+
         Self {
             next_id: Mutex::new(1),
             unique_port,
             bind_ip,
             advertise_ip,
             outgoing_conninfo_sender,
-            host_services: Arc::new(RwLock::new(HashMap::new())),
+            host_services,
         }
     }
 
-    pub async fn new_server(&mut self, handler: IoHandler) -> Result<ServerId, Error> {
+    pub async fn new_server(&mut self, handler: IoHandler) -> Result<ServiceId, Error> {
         log::info!("{} - newServer called", LOG_PREFIX);
         // get next service_id, increment the underlying value, and release lock in the block
         let service_id = self.next_service_id().await;
@@ -139,5 +152,37 @@ impl JsonRpcBroker {
 
     pub fn get_unused_port(&mut self) -> Option<u16> {
         self.unique_port.get_unused_port()
+    }
+
+
+    // This function will run forever. tokio::spawn this!
+    async fn blocking_incoming_conn(mut stream: Streaming<ConnInfo>, host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>) {
+        log::info!(
+            "{}blocking_incoming_conn - perpetually listening for incoming ConnInfo's",
+            LOG_PREFIX
+        );
+        while let Some(conn_info_result) = stream.next().await {
+            match conn_info_result {
+                Err(e) => {
+                    log::error!(
+                        "{}blocking_incoming_conn - an error occurred reading from the stream: {:?}",
+                        LOG_PREFIX,
+                        e
+                    );
+                    break; //out of the while loop
+                }
+                Ok(conn_info) => {
+                    log::debug!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
+                    let mut hs = host_services.write().await;
+
+                    log::debug!("{}Write-locked the host services to add the new ConnInfo", LOG_PREFIX);
+                    hs.insert(conn_info.service_id, conn_info);
+                }
+            }
+        }
+        log::info!(
+            "{}blocking_incoming_conn - exiting due to stream returning None or an error",
+            LOG_PREFIX
+        );
     }
 }
