@@ -46,7 +46,7 @@ impl GrpcStdioImpl {
         Ok(Box::pin(merged_stream))
     }
 
-    fn new_stream<'a>(
+    fn new_stream(
         stream_name: &'static str,
         channel: i32,
         mut redirected_buf: BufferRedirect,
