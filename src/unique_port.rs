@@ -39,3 +39,9 @@ impl UniquePort {
         }
     }
 }
+
+impl Default for UniquePort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
