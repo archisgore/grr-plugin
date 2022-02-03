@@ -6,7 +6,6 @@ use tokio::sync::mpsc::error::SendError;
 
 use tonic::transport::Error as TonicError;
 
-use super::Status;
 use http::uri::InvalidUri;
 
 #[macro_export]
@@ -82,12 +81,6 @@ impl Display for Error {
 }
 
 impl StdError for Error {}
-
-impl Into<Status> for Error {
-    fn into(self) -> Status {
-        Status::unknown(format!("{:?}", self))
-    }
-}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {

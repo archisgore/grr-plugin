@@ -223,14 +223,11 @@ impl JsonRpcBroker {
         let mut hs = self.host_services.lock().await;
 
         match hs.remove(&service_id) {
-            None => None,
-            Some(optional_conninfo) => match optional_conninfo {
-                None => None,
-                Some(conn_info) => {
-                    // if some conn_info existed, replace it with None before exiting
-                    hs.insert(service_id, None);
-                    Some(conn_info)
-                }
+            None | Some(None) => None,
+            Some(Some(conn_info)) => {
+                // if some conn_info existed, replace it with None before exiting
+                hs.insert(service_id, None);
+                Some(conn_info)
             },
         }
     }
