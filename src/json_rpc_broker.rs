@@ -228,7 +228,7 @@ impl JsonRpcBroker {
                 // if some conn_info existed, replace it with None before exiting
                 hs.insert(service_id, None);
                 Some(conn_info)
-            },
+            }
         }
     }
 
