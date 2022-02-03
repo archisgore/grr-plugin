@@ -6,6 +6,8 @@ use tokio::sync::mpsc::error::SendError;
 
 use tonic::transport::Error as TonicError;
 
+use http::uri::InvalidUri;
+
 #[macro_export]
 macro_rules! function {
     () => {{
@@ -48,11 +50,14 @@ macro_rules! log_and_escalate_status {
 pub enum Error {
     NoTCPPortAvailable,
     GRPCHandshakeMagicCookieValueMismatch,
+    ServiceIdDoesNotExist(u32),
     Io(std::io::Error),
     Generic(String),
     TonicTransport(TonicError),
     AddrParser(std::net::AddrParseError),
     Send(String),
+    InvalidUri(InvalidUri),
+    NetworkTypeUnknown(String),
 }
 
 impl Display for Error {
@@ -63,11 +68,14 @@ impl Display for Error {
                 "No ports were available to bind the plugin's gRPC server to."
             ),
             Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
+            Self::ServiceIdDoesNotExist(service_id) => write!(f, "The requested ServiceId {} does not exist.", service_id),
             Self::Generic(s) => write!(f, "{}", s),
             Self::Io(e) => write!(f, "Error with IO: {:?}", e),
             Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
             Self::AddrParser(e) => write!(f, "Error parsing string into a network address: {:?}", e),
             Self::Send(s) => write!(f, "Error sending on a mpsc channel: {}", s),
+            Self::InvalidUri(e) => write!(f, "Invalid Uri: {}", e),
+            Self::NetworkTypeUnknown(network) => write!(f, "Service endpoint type unknown: {}", network),
         }
     }
 }
@@ -98,5 +106,11 @@ impl<T> From<SendError<T>> for Error {
             "unable to send {} on a mpsc channel",
             std::any::type_name::<T>()
         ))
+    }
+}
+
+impl From<InvalidUri> for Error {
+    fn from(err: InvalidUri) -> Self {
+        Self::InvalidUri(err)
     }
 }

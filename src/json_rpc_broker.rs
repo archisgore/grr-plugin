@@ -11,13 +11,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 use tonic::Streaming;
+use tokio::net::UnixStream;
+use tonic::transport::{Endpoint, Uri, Channel};
+use tower::service_fn;
 
 const LOG_PREFIX: &str = "JsonRpcBroker:: ";
 
 type ServiceId = u32;
 
+// Brokers connections by service_id
+// Not necessarily threadsafe, so caller should Arc<RwLock<>> this,
+// but I don't know how you'd get multiple mutable references without that anyway.
 pub struct JsonRpcBroker {
     unique_port: UniquePort,
     next_id: Mutex<u32>,
@@ -32,7 +37,10 @@ pub struct JsonRpcBroker {
     outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
 
     // Services on the host-side that we've been informed of
-    host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>,
+    // The optional ConnInfo entry allows us to park a None
+    // against a ServiceId that was previously used, so it won't get
+    // reused.
+    host_services: Arc<Mutex<HashMap<ServiceId, Option<ConnInfo>>>>,
 }
 
 impl JsonRpcBroker {
@@ -44,7 +52,7 @@ impl JsonRpcBroker {
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
     ) -> Self {
         log::trace!("{} - new - called", LOG_PREFIX);
-        let host_services = Arc::new(RwLock::new(HashMap::new()));
+        let host_services = Arc::new(Mutex::new(HashMap::new()));
 
         log::trace!("{} - new - spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...", LOG_PREFIX);
         let host_services_for_closure = host_services.clone();
@@ -165,10 +173,55 @@ impl JsonRpcBroker {
         self.unique_port.get_unused_port()
     }
 
+    pub async fn dial_to_host_service(&mut self, service_id: ServiceId) -> Result<Channel, Error> {
+        let conn_info = match self.get_incoming_conninfo(service_id).await {
+            None => return Err(Error::ServiceIdDoesNotExist(service_id)),
+            Some(conn_info) => conn_info,
+        };
+
+        let channel = match conn_info.network.as_str() {
+            "tcp" => {
+                Endpoint::try_from(conn_info.address)?.connect().await?
+            },
+            "unix" => {
+                // Copied from: https://github.com/hyperium/tonic/blob/master/examples/src/uds/client.rs
+                Endpoint::try_from("http://[::]:50051")?
+                .connect_with_connector(service_fn(move |_: Uri| {        
+                    // Connect to a Uds socket
+                    // The clone ensures this closure doesn't consume the environment.
+                    UnixStream::connect(conn_info.address.clone())
+                }))
+                .await?
+            },
+            s => return Err(Error::NetworkTypeUnknown(s.to_string())),
+        };
+
+        Ok(channel)
+    }
+
+    //https://github.com/hashicorp/go-plugin/blob/master/grpc_broker.go#L371
+    pub async fn get_incoming_conninfo(&mut self, service_id: ServiceId) -> Option<ConnInfo> {
+        // hold lock for duration of this function, so we can atomically park a None
+        // in case we pulled a ConnInfo out.
+        let mut hs = self.host_services.lock().await;
+
+        match hs.remove(&service_id) {
+            None => None,
+            Some(optional_conninfo) => match optional_conninfo {
+                None => None,
+                Some(conn_info) => {
+                    // if some conn_info existed, replace it with None before exiting
+                    hs.insert(service_id, None);
+                    Some(conn_info)
+                }
+            }
+        }
+    }
+
     // This function will run forever. tokio::spawn this!
     async fn blocking_incoming_conn(
         mut stream: Streaming<ConnInfo>,
-        host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>,
+        host_services: Arc<Mutex<HashMap<ServiceId, Option<ConnInfo>>>>,
     ) {
         log::info!(
             "{}blocking_incoming_conn - perpetually listening for incoming ConnInfo's",
@@ -185,16 +238,16 @@ impl JsonRpcBroker {
                     break; //out of the while loop
                 }
                 Ok(conn_info) => {
-                    log::trace!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
+                    log::info!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
 
-                    let mut hs = host_services.write().await;
+                    let mut hs = host_services.lock().await;
                     log::trace!(
                         "{}Write-locked the host services to add the new ConnInfo",
                         LOG_PREFIX
                     );
 
-                    hs.insert(conn_info.service_id, conn_info);
-                    log::trace!("{}Created a new entry for ConnInfo", LOG_PREFIX);
+                    log::trace!("{}Only creating a new entry if one doesn't exist for this ServiceId: {}", LOG_PREFIX, conn_info.service_id);
+                    hs.entry(conn_info.service_id).or_insert_with(|| Some(conn_info));
                 }
             }
         }
