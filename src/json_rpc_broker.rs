@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tonic::Streaming;
 
-const LOG_PREFIX: &str = "JsonRpcServer:: ";
+const LOG_PREFIX: &str = "JsonRpcBroker:: ";
 
 type ServiceId = u32;
 
@@ -43,13 +43,13 @@ impl JsonRpcBroker {
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
     ) -> Self {
-        log::info!("{} - new - called", LOG_PREFIX);
+        log::trace!("{} - new - called", LOG_PREFIX);
         let host_services = Arc::new(RwLock::new(HashMap::new()));
 
-        log::info!("{} - new - spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...", LOG_PREFIX);
+        log::trace!("{} - new - spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...", LOG_PREFIX);
         let host_services_for_closure = host_services.clone();
         tokio::spawn(async move {
-            log::info!("{} - new - Inside spawn'd process. Waiting for the stream of ConnInfo's to be available....", LOG_PREFIX);
+            log::trace!("{} - new - Inside spawn'd process. Waiting for the stream of ConnInfo's to be available....", LOG_PREFIX);
             let incoming_conninfo_stream = match incoming_conninfo_stream_receiver_receiver
                 .recv()
                 .await
@@ -75,7 +75,7 @@ impl JsonRpcBroker {
     }
 
     pub async fn new_server(&mut self, handler: IoHandler) -> Result<ServiceId, Error> {
-        log::info!("{} - newServer called", LOG_PREFIX);
+        log::trace!("{} - newServer called", LOG_PREFIX);
         // get next service_id, increment the underlying value, and release lock in the block
         let service_id = self.next_service_id().await;
 
@@ -91,7 +91,7 @@ impl JsonRpcBroker {
         };
 
         let bind_addrstr = format!("{}:{}", self.bind_ip, service_port);
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - created bind address string: {}",
             LOG_PREFIX,
             service_id,
@@ -100,7 +100,7 @@ impl JsonRpcBroker {
 
         let bind_addr = &bind_addrstr.parse()?;
 
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - about to create server...",
             LOG_PREFIX,
             service_id
@@ -108,7 +108,7 @@ impl JsonRpcBroker {
         let server = log_and_escalate!(ServerBuilder::new(handler).start_http(bind_addr));
 
         tokio::spawn(async move {
-            log::info!("{} - newServer({}) - spawned into separate task to wait for this server to complete...", LOG_PREFIX, service_id);
+            log::trace!("{} - newServer({}) - spawned into separate task to wait for this server to complete...", LOG_PREFIX, service_id);
             server.wait();
             log::info!(
                 "{} - newServer({}) - server.wait() exited. Server has stopped",
@@ -118,21 +118,21 @@ impl JsonRpcBroker {
         });
 
         let advertise_addrstr = format!("{}:{}", self.advertise_ip, service_port);
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - created advertise address string: {}",
             LOG_PREFIX,
             service_id,
             advertise_addrstr
         );
 
-        log::debug!("{} - newServer({}) - Creating ConnInfo for this service to send to the client-side broker.", LOG_PREFIX, service_id);
+        log::trace!("{} - newServer({}) - Creating ConnInfo for this service to send to the client-side broker.", LOG_PREFIX, service_id);
         let conn_info = ConnInfo {
             network: "tcp".to_string(),
             address: advertise_addrstr,
             service_id,
         };
 
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - Created ConnInfo for this service: {:?}",
             LOG_PREFIX,
             service_id,
@@ -140,13 +140,13 @@ impl JsonRpcBroker {
         );
 
         log_and_escalate!(self.outgoing_conninfo_sender.send(Ok(conn_info)));
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - Send ConnInfo to client-side broker",
             LOG_PREFIX,
             service_id
         );
 
-        log::debug!(
+        log::trace!(
             "{} - newServer({}) - returning service_id.",
             LOG_PREFIX,
             service_id
@@ -185,16 +185,16 @@ impl JsonRpcBroker {
                     break; //out of the while loop
                 }
                 Ok(conn_info) => {
-                    log::debug!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
+                    log::trace!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
 
                     let mut hs = host_services.write().await;
-                    log::debug!(
+                    log::trace!(
                         "{}Write-locked the host services to add the new ConnInfo",
                         LOG_PREFIX
                     );
 
                     hs.insert(conn_info.service_id, conn_info);
-                    log::debug!("{}Created a new entry for ConnInfo", LOG_PREFIX);
+                    log::trace!("{}Created a new entry for ConnInfo", LOG_PREFIX);
                 }
             }
         }
