@@ -49,7 +49,8 @@ pub struct Server {
     outgoing_conninfo_receiver_receiver:
         UnboundedReceiver<UnboundedReceiver<Result<ConnInfo, Status>>>,
     incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
-    incoming_conninfo_stream_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
+    incoming_conninfo_stream_receiver_receiver:
+        UnboundedReceiver<UnboundedReceiver<Streaming<ConnInfo>>>,
 }
 
 impl Server {
@@ -81,17 +82,27 @@ impl Server {
         let (incoming_conninfo_stream_sender, incoming_conninfo_stream_receiver) =
             unbounded_channel();
 
+        // Do the same dance of channel-of-channels to send the receiver since the underlying stream won't be available
+        // for quite some time.
+        let (
+            incoming_conninfo_stream_receiver_transmitter,
+            incoming_conninfo_stream_receiver_receiver,
+        ) = unbounded_channel();
+        log_and_escalate!(
+            incoming_conninfo_stream_receiver_transmitter.send(incoming_conninfo_stream_receiver)
+        );
+
         Ok(Server {
             handshake_config,
             protocol_version,
             outgoing_conninfo_sender_receiver,
             outgoing_conninfo_receiver_receiver,
             incoming_conninfo_stream_sender,
-            incoming_conninfo_stream_receiver,
+            incoming_conninfo_stream_receiver_receiver,
         })
     }
 
-    pub async fn jsonrpc_server_broker(&mut self) -> Result<JsonRpcBroker, Error> {
+    pub async fn jsonrpc_broker(&mut self) -> Result<JsonRpcBroker, Error> {
         let outgoing_conninfo_sender = match self.outgoing_conninfo_sender_receiver.recv().await {
             None => {
                 let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
@@ -101,9 +112,13 @@ impl Server {
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
 
-        let incoming_conninfo_stream = match self.incoming_conninfo_stream_receiver.recv().await {
+        let incoming_conninfo_stream_receiver = match self
+            .incoming_conninfo_stream_receiver_receiver
+            .recv()
+            .await
+        {
             None => {
-                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's incoming stream of ConnInfo was None, which, should have been sent by the GRPCBroker during the start_stream call.", LOG_PREFIX);
+                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's  receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.", LOG_PREFIX);
                 log::error!("{}", errmsg);
                 return Err(Error::Generic(errmsg));
             }
@@ -120,7 +135,7 @@ impl Server {
             LOCALHOST_BIND_ADDR.to_string(),
             LOCALHOST_ADVERTISE_ADDR.to_string(),
             outgoing_conninfo_sender,
-            incoming_conninfo_stream,
+            incoming_conninfo_stream_receiver,
         );
 
         log::info!("{}new -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);

@@ -4,15 +4,15 @@ use super::unique_port::UniquePort;
 use super::Error;
 use super::{ConnInfo, Status};
 use crate::{function, log_and_escalate};
+use futures::stream::StreamExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
 use jsonrpc_http_server::ServerBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tonic::Streaming;
-use futures::stream::StreamExt;
 
 const LOG_PREFIX: &str = "JsonRpcServer:: ";
 
@@ -41,20 +41,31 @@ impl JsonRpcBroker {
         bind_ip: String,
         advertise_ip: String,
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
-        incoming_conninfo_stream: Streaming<ConnInfo>,
+        mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
     ) -> Self {
         log::info!("{} - new - called", LOG_PREFIX);
         let host_services = Arc::new(RwLock::new(HashMap::new()));
 
-        log::info!("{} - new - spawning a process to receive incoming ConnInfo's from host side...", LOG_PREFIX);
+        log::info!("{} - new - spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...", LOG_PREFIX);
         let host_services_for_closure = host_services.clone();
         tokio::spawn(async move {
-            log::info!("{} - new - Inside spawn'd process. Calling a blocking listener.", LOG_PREFIX);
+            log::info!("{} - new - Inside spawn'd process. Waiting for the stream of ConnInfo's to be available....", LOG_PREFIX);
+            let incoming_conninfo_stream = match incoming_conninfo_stream_receiver_receiver
+                .recv()
+                .await
+            {
+                Some(incoming_conninfo_stream) => incoming_conninfo_stream,
+                None => {
+                    log::error!("{} - new - inside spawn'd process to wait for a Stream of ConnInfo's, the stream was None, which is unexpected, since it is expected instead to block indefinitely until such a stream is available.", LOG_PREFIX);
+                    return;
+                }
+            };
+
             Self::blocking_incoming_conn(incoming_conninfo_stream, host_services_for_closure).await
         });
 
         Self {
-            next_id: Mutex::new(1),
+            next_id: Mutex::new(1), // start next id at a number where it won't conflict with other services
             unique_port,
             bind_ip,
             advertise_ip,
@@ -154,9 +165,11 @@ impl JsonRpcBroker {
         self.unique_port.get_unused_port()
     }
 
-
     // This function will run forever. tokio::spawn this!
-    async fn blocking_incoming_conn(mut stream: Streaming<ConnInfo>, host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>) {
+    async fn blocking_incoming_conn(
+        mut stream: Streaming<ConnInfo>,
+        host_services: Arc<RwLock<HashMap<ServiceId, ConnInfo>>>,
+    ) {
         log::info!(
             "{}blocking_incoming_conn - perpetually listening for incoming ConnInfo's",
             LOG_PREFIX
@@ -173,10 +186,15 @@ impl JsonRpcBroker {
                 }
                 Ok(conn_info) => {
                     log::debug!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
-                    let mut hs = host_services.write().await;
 
-                    log::debug!("{}Write-locked the host services to add the new ConnInfo", LOG_PREFIX);
+                    let mut hs = host_services.write().await;
+                    log::debug!(
+                        "{}Write-locked the host services to add the new ConnInfo",
+                        LOG_PREFIX
+                    );
+
                     hs.insert(conn_info.service_id, conn_info);
+                    log::debug!("{}Created a new entry for ConnInfo", LOG_PREFIX);
                 }
             }
         }

@@ -1,13 +1,10 @@
-
 use std::error::Error as StdError;
 use std::fmt::Debug;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use tokio::sync::mpsc::error::SendError;
 
-
 use tonic::transport::Error as TonicError;
-
 
 #[macro_export]
 macro_rules! function {
