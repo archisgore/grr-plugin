@@ -23,12 +23,12 @@ pub async fn new_server(
     conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
     incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
 ) -> Result<GrpcBrokerServer<GrpcBrokerImpl>, Error> {
-    log::info!("{} new_server - called.", LOG_PREFIX);
+    log::trace!("{} new_server - called.", LOG_PREFIX);
 
     log::trace!("{} new_server - creating GrpcBrokerImpl.", LOG_PREFIX);
     let broker = GrpcBrokerImpl::new(conn_info_receiver, incoming_conninfo_stream_sender)?;
 
-    log::info!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
+    log::trace!("{} new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.", LOG_PREFIX);
     Ok(GrpcBrokerServer::new(broker))
 }
 
@@ -52,7 +52,7 @@ impl GrpcBrokerImpl {
         conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
         incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
     ) -> Result<GrpcBrokerImpl, Error> {
-        log::info!("{} GrpcBrokerImpl::new - called.", LOG_PREFIX);
+        log::trace!("{} GrpcBrokerImpl::new - called.", LOG_PREFIX);
 
         log::trace!(
             "{} GrpcBrokerImpl::new - creating outgoing stream.",
@@ -67,7 +67,7 @@ impl GrpcBrokerImpl {
             unbounded_channel();
         outgoing_conninfo_receiver_transmitter.send(outgoing_stream)?;
 
-        log::info!(
+        log::trace!(
             "{} GrpcBrokerImpl::new - Creating a new GrpcBrokerImpl with interior mutability.",
             LOG_PREFIX
         );
@@ -82,20 +82,21 @@ impl GrpcBrokerImpl {
     fn new_outgoing_stream(
         mut conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
     ) -> <Self as GrpcBroker>::StartStreamStream {
-        log::info!("{} new_outgoing_stream called.", LOG_PREFIX);
+        log::trace!("{} new_outgoing_stream called.", LOG_PREFIX);
 
         let s = stream! {
-            log::info!("{} outgoing_stream repeater initialized.", LOG_PREFIX);
+            log::trace!("{} outgoing_stream repeater initialized.", LOG_PREFIX);
             loop {
-                log::info!("{} outgoing_stream loop iteration", LOG_PREFIX);
+                log::trace!("{} outgoing_stream loop iteration", LOG_PREFIX);
                 match conn_info_receiver.recv().await {
                     Some(result) => {
-                        log::info!("{} Sending Result<ConnInfo> to outgoing_stream: {:?}.", LOG_PREFIX, result);
+                        log::trace!("{} Sending Result<ConnInfo> to outgoing_stream: {:?}.", LOG_PREFIX, result);
                         yield result
                     },
                     None => {
-                        log::info!("{} incoming receiver for outgoing_stream received an empty item. Unexpected.", LOG_PREFIX);
-                        yield Err(Status::unknown("received an empty message from plugin side to GrpcBroker"))
+                        let errmsg = format!("{} incoming receiver for outgoing_stream received an empty item. Unexpected.", LOG_PREFIX);
+                        log::error!("{errmsg}");
+                        yield Err(Status::unknown(errmsg))
                     },
                 }
             }
@@ -105,7 +106,7 @@ impl GrpcBrokerImpl {
             Box<dyn Stream<Item = Result<ConnInfo, Status>> + Sync + Send + 'static>,
         > = Box::pin(s);
 
-        log::info!("{} outgoing stream created and returning...", LOG_PREFIX);
+        log::trace!("{} outgoing stream created and returning...", LOG_PREFIX);
         dyn_stream
     }
 }
@@ -119,7 +120,7 @@ impl GrpcBroker for GrpcBrokerImpl {
         &self,
         req: Request<Streaming<ConnInfo>>,
     ) -> Result<Response<Self::StartStreamStream>, Status> {
-        log::info!("{} start_stream called.", LOG_PREFIX);
+        log::trace!("{} start_stream called.", LOG_PREFIX);
 
         let mut interior_write_guard = self.interior.write().await;
         let interior = interior_write_guard.deref_mut();
@@ -131,7 +132,7 @@ impl GrpcBroker for GrpcBrokerImpl {
                 Err(Status::unknown(errmsg))
             }
             Some(os) => {
-                log::info!(
+                log::trace!(
                     "{} start_stream - sending the Stream of incoming ConnInfo to someone else to broker...",
                     LOG_PREFIX
                 );

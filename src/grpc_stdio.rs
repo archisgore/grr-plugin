@@ -29,11 +29,14 @@ pub struct GrpcStdioImpl {}
 
 impl GrpcStdioImpl {
     fn new_combined_stream() -> Result<<Self as GrpcStdio>::StreamStdioStream, Status> {
-        log::info!(
+        log::trace!(
             "{}new_inner_stream called. Asked for a stream of stdout and stderr",
             LOG_PREFIX
         );
-        log::debug!("{}Gagging stdout and stderr to a buffer...", LOG_PREFIX);
+        log::info!(
+            "{}Gagging stdout and stderr to a buffer for redirection to plugin's host.",
+            LOG_PREFIX
+        );
         let stdoutbuf = log_and_escalate_status!(BufferRedirect::stdout());
         let stderrbuf = log_and_escalate_status!(BufferRedirect::stderr());
 
@@ -62,7 +65,7 @@ impl GrpcStdioImpl {
                             sleep(Duration::from_millis(CONSOLE_POLL_SLEEP_MILLIS)).await;
                         },
                         _ => {
-                            log::debug!("{}Sending {} {} bytes of data: {}", LOG_PREFIX, stream_name, len, readbuf);
+                            log::trace!("{}Sending {} {} bytes of data: {}", LOG_PREFIX, stream_name, len, readbuf);
                             yield Ok(StdioData{
                                 channel,
                                 data: readbuf.into_bytes(),
@@ -88,11 +91,11 @@ impl GrpcStdio for GrpcStdioImpl {
         &self,
         _req: Request<()>,
     ) -> Result<Response<Self::StreamStdioStream>, Status> {
-        log::info!("{} stream_stdio called.", LOG_PREFIX);
+        log::trace!("{} stream_stdio called.", LOG_PREFIX);
 
         let s = GrpcStdioImpl::new_combined_stream()?;
 
-        log::info!(
+        log::trace!(
             "{} stream_stdio responding with a stream of StdioData.",
             LOG_PREFIX
         );

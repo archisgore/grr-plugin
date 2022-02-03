@@ -27,10 +27,10 @@ impl UniquePort {
                 None => return None,
                 Some(p) => {
                     if self.vended_ports.contains(&p) {
-                        log::info!("{} - Skipped port: {} because it is in the list of previously vended ports: {:?}", LOG_PREFIX, p, self.vended_ports);
+                        log::trace!("{} - Skipped port: {} because it is in the list of previously vended ports: {:?}", LOG_PREFIX, p, self.vended_ports);
                         continue;
                     } else {
-                        log::info!("{} - Vending port: {}", LOG_PREFIX, p);
+                        log::trace!("{} - Vending port: {}", LOG_PREFIX, p);
                         self.vended_ports.push(p);
                         return Some(p);
                     }

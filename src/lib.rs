@@ -126,7 +126,7 @@ impl Server {
         };
 
         // create the JSON-RPC 2.0 server broker
-        log::info!(
+        log::trace!(
             "{}new -  Creating the JSON RPC 2.0 Server Broker.",
             LOG_PREFIX
         );
@@ -177,7 +177,7 @@ impl Server {
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
-        log::info!("{}serve - serving over a Tcp Socket...", LOG_PREFIX);
+        log::trace!("{}serve - serving over a Tcp Socket...", LOG_PREFIX);
 
         log_and_escalate!(self.validate_magic_cookie());
 
@@ -209,7 +209,7 @@ impl Server {
             service_port
         );
 
-        log::info!(
+        log::trace!(
             "{}serve - Created Handshake string: {}",
             LOG_PREFIX,
             handshakestr
@@ -233,8 +233,8 @@ impl Server {
         log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
         let stdio_server = grpc_stdio::new_server();
 
-        log::info!("{} serve - All servers created.", LOG_PREFIX);
         log::info!("{}serve - Starting service...", LOG_PREFIX);
+
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)
             .add_service(broker_server)
@@ -248,7 +248,7 @@ impl Server {
             LOG_PREFIX,
             handshakestr
         );
-        println!("{}", handshakestr);
+        println!("{}                        \n\n", handshakestr);
 
         // starting broker and plugin services now...
         //join!(broker_service_future, plugin_service_future);
