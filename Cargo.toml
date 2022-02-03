@@ -1,6 +1,6 @@
 [package]
 name = "grr-plugin"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Archis Gore <me@archisgore.com>"]
 description = "A Rust-based go-plugin implementation, to allow Rust plugins into Go programs."
