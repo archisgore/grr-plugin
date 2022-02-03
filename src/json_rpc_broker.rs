@@ -205,8 +205,8 @@ impl JsonRpcBroker {
     ) -> Result<ConnInfo, Error> {
         match self.get_incoming_conninfo(service_id).await {
             None => match retry_count {
-                0 => return Err(Error::ServiceIdDoesNotExist(service_id)),
-                c => {
+                0 => Err(Error::ServiceIdDoesNotExist(service_id)),
+                _c => {
                     sleep(Duration::from_secs(1)).await;
                     self.get_incoming_conninfo_retry(service_id, retry_count - 1)
                         .await
