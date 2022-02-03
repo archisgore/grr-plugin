@@ -6,6 +6,7 @@ use tokio::sync::mpsc::error::SendError;
 
 use tonic::transport::Error as TonicError;
 
+use super::Status;
 use http::uri::InvalidUri;
 
 #[macro_export]
@@ -68,7 +69,7 @@ impl Display for Error {
                 "No ports were available to bind the plugin's gRPC server to."
             ),
             Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
-            Self::ServiceIdDoesNotExist(service_id) => write!(f, "The requested ServiceId {} does not exist.", service_id),
+            Self::ServiceIdDoesNotExist(service_id) => write!(f, "The requested ServiceId {} does not exist and timed out waiting for it.", service_id),
             Self::Generic(s) => write!(f, "{}", s),
             Self::Io(e) => write!(f, "Error with IO: {:?}", e),
             Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
@@ -81,6 +82,12 @@ impl Display for Error {
 }
 
 impl StdError for Error {}
+
+impl Into<Status> for Error {
+    fn into(self) -> Status {
+        Status::unknown(format!("{:?}", self))
+    }
+}
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {

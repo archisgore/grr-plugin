@@ -4,16 +4,19 @@ use super::unique_port::UniquePort;
 use super::Error;
 use super::{ConnInfo, Status};
 use crate::{function, log_and_escalate};
+use async_recursion::async_recursion;
 use futures::stream::StreamExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
 use jsonrpc_http_server::ServerBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::time::sleep;
+use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
-use tokio::net::UnixStream;
-use tonic::transport::{Endpoint, Uri, Channel};
 use tower::service_fn;
 
 const LOG_PREFIX: &str = "JsonRpcBroker:: ";
@@ -174,33 +177,47 @@ impl JsonRpcBroker {
     }
 
     pub async fn dial_to_host_service(&mut self, service_id: ServiceId) -> Result<Channel, Error> {
-        let conn_info = match self.get_incoming_conninfo(service_id).await {
-            None => return Err(Error::ServiceIdDoesNotExist(service_id)),
-            Some(conn_info) => conn_info,
-        };
+        let conn_info = self.get_incoming_conninfo_retry(service_id, 5).await?;
 
         let channel = match conn_info.network.as_str() {
-            "tcp" => {
-                Endpoint::try_from(conn_info.address)?.connect().await?
-            },
+            "tcp" => Endpoint::try_from(conn_info.address)?.connect().await?,
             "unix" => {
                 // Copied from: https://github.com/hyperium/tonic/blob/master/examples/src/uds/client.rs
                 Endpoint::try_from("http://[::]:50051")?
-                .connect_with_connector(service_fn(move |_: Uri| {        
-                    // Connect to a Uds socket
-                    // The clone ensures this closure doesn't consume the environment.
-                    UnixStream::connect(conn_info.address.clone())
-                }))
-                .await?
-            },
+                    .connect_with_connector(service_fn(move |_: Uri| {
+                        // Connect to a Uds socket
+                        // The clone ensures this closure doesn't consume the environment.
+                        UnixStream::connect(conn_info.address.clone())
+                    }))
+                    .await?
+            }
             s => return Err(Error::NetworkTypeUnknown(s.to_string())),
         };
 
         Ok(channel)
     }
 
+    #[async_recursion]
+    async fn get_incoming_conninfo_retry(
+        &mut self,
+        service_id: ServiceId,
+        retry_count: usize,
+    ) -> Result<ConnInfo, Error> {
+        match self.get_incoming_conninfo(service_id).await {
+            None => match retry_count {
+                0 => return Err(Error::ServiceIdDoesNotExist(service_id)),
+                c => {
+                    sleep(Duration::from_secs(1)).await;
+                    self.get_incoming_conninfo_retry(service_id, retry_count - 1)
+                        .await
+                }
+            },
+            Some(conn_info) => Ok(conn_info),
+        }
+    }
+
     //https://github.com/hashicorp/go-plugin/blob/master/grpc_broker.go#L371
-    pub async fn get_incoming_conninfo(&mut self, service_id: ServiceId) -> Option<ConnInfo> {
+    async fn get_incoming_conninfo(&mut self, service_id: ServiceId) -> Option<ConnInfo> {
         // hold lock for duration of this function, so we can atomically park a None
         // in case we pulled a ConnInfo out.
         let mut hs = self.host_services.lock().await;
@@ -214,7 +231,7 @@ impl JsonRpcBroker {
                     hs.insert(service_id, None);
                     Some(conn_info)
                 }
-            }
+            },
         }
     }
 
@@ -246,8 +263,13 @@ impl JsonRpcBroker {
                         LOG_PREFIX
                     );
 
-                    log::trace!("{}Only creating a new entry if one doesn't exist for this ServiceId: {}", LOG_PREFIX, conn_info.service_id);
-                    hs.entry(conn_info.service_id).or_insert_with(|| Some(conn_info));
+                    log::trace!(
+                        "{}Only creating a new entry if one doesn't exist for this ServiceId: {}",
+                        LOG_PREFIX,
+                        conn_info.service_id
+                    );
+                    hs.entry(conn_info.service_id)
+                        .or_insert_with(|| Some(conn_info));
                 }
             }
         }
