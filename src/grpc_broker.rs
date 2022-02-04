@@ -6,7 +6,7 @@ pub mod grpc_plugins {
 pub use grpc_plugins::ConnInfo;
 
 use super::Error;
-use crate::{function, log_and_escalate_status};
+use crate::log_and_escalate_status;
 use async_stream::stream;
 use futures::stream::Stream;
 use grpc_plugins::grpc_broker_server::{GrpcBroker, GrpcBrokerServer};

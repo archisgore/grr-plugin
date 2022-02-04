@@ -3,7 +3,7 @@ pub mod grpc_plugins {
     tonic::include_proto!("plugin");
 }
 
-use crate::{function, log_and_escalate_status};
+use crate::log_and_escalate_status;
 use async_stream::stream;
 use futures::stream::Stream;
 use gag::BufferRedirect;

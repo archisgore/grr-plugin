@@ -3,7 +3,7 @@
 use super::unique_port::UniquePort;
 use super::Error;
 use super::{ConnInfo, Status};
-use crate::{function, log_and_escalate};
+use crate::log_and_escalate;
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
