@@ -25,7 +25,7 @@ macro_rules! log_and_escalate {
     ($e:expr) => {
         match $e {
             Err(err) => {
-                log::error!("{},({}:{}), {:?}", function!(), file!(), line!(), err);
+                log::error!("{:?}", err);
                 return Err(Error::from(err));
             }
             Ok(o) => o,
@@ -38,7 +38,7 @@ macro_rules! log_and_escalate_status {
     ($e:expr) => {
         match $e {
             Err(err) => {
-                log::error!("{},({}:{}), {:?}", function!(), file!(), line!(), err);
+                log::error!("{:?}", err);
                 return Err(tonic::Status::unknown(format!("{:?}", err)));
             }
             Ok(o) => o,
