@@ -9,6 +9,7 @@ mod unique_port;
 
 pub use error::Error;
 
+use anyhow::anyhow;
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
@@ -105,9 +106,9 @@ impl Server {
     pub async fn jsonrpc_broker(&mut self) -> Result<JsonRpcBroker, Error> {
         let outgoing_conninfo_sender = match self.outgoing_conninfo_sender_receiver.recv().await {
             None => {
-                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
-                log::error!("{}", errmsg);
-                return Err(Error::Generic(errmsg));
+                let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
+                log::error!("{}", err);
+                return Err(Error::Generic(err));
             }
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
@@ -118,9 +119,9 @@ impl Server {
             .await
         {
             None => {
-                let errmsg = format!("{} jsonrpc_server_broker - jsonrpc_server_broker's  receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.", LOG_PREFIX);
-                log::error!("{}", errmsg);
-                return Err(Error::Generic(errmsg));
+                let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's  receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.", LOG_PREFIX);
+                log::error!("{}", err);
+                return Err(Error::Generic(err));
             }
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
@@ -190,9 +191,10 @@ impl Server {
         let service_port = match unique_port::UniquePort::new().get_unused_port() {
             Some(p) => p,
             None => {
-                return Err(Error::Generic(
-                    "Unable to find a free unused TCP port to bind the gRPC server to".to_string(),
-                ));
+                let err =
+                    anyhow!("Unable to find a free unused TCP port to bind the gRPC server to");
+                log::error!("{}", err);
+                return Err(Error::Generic(err));
             }
         };
 
@@ -217,7 +219,7 @@ impl Server {
 
         let outgoing_conninfo_receiver = match self.outgoing_conninfo_receiver_receiver.recv().await {
             Some(outgoing_conninfo_receiver) => outgoing_conninfo_receiver,
-            None => return Err(Error::Generic("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method.".to_string())),
+            None => return Err(Error::Generic(anyhow!("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method."))),
         };
 
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);

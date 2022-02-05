@@ -1,6 +1,5 @@
-use std::error::Error as StdError;
 use std::fmt::Debug;
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use thiserror::Error as ThisError;
 
 use tokio::sync::mpsc::error::SendError;
 
@@ -46,58 +45,28 @@ macro_rules! log_and_escalate_status {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, ThisError)]
 pub enum Error {
+    #[error("No ports were available to bind the plugin's gRPC server to.")]
     NoTCPPortAvailable,
+    #[error("This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed.")]
     GRPCHandshakeMagicCookieValueMismatch,
+    #[error("The requested ServiceId {0} does not exist and timed out waiting for it.")]
     ServiceIdDoesNotExist(u32),
-    Io(std::io::Error),
-    Generic(String),
-    TonicTransport(TonicError),
-    AddrParser(std::net::AddrParseError),
+    #[error("Error with IO: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Error with tonic (gRPC) transport: {0}")]
+    TonicTransport(#[from] TonicError),
+    #[error("Error parsing string into a network address: {0}")]
+    AddrParser(#[from] std::net::AddrParseError),
+    #[error("Error sending on a mpsc channel: {0}")]
     Send(String),
-    InvalidUri(InvalidUri),
+    #[error("Invalid Uri: {0}")]
+    InvalidUri(#[from] InvalidUri),
+    #[error("Service endpoint type unknown: {0}")]
     NetworkTypeUnknown(String),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::NoTCPPortAvailable => write!(
-                f,
-                "No ports were available to bind the plugin's gRPC server to."
-            ),
-            Self::GRPCHandshakeMagicCookieValueMismatch => write!(f, "This executable is meant to be a go-plugin to other processes. Do not run this directly. The Magic Handshake failed."),
-            Self::ServiceIdDoesNotExist(service_id) => write!(f, "The requested ServiceId {} does not exist and timed out waiting for it.", service_id),
-            Self::Generic(s) => write!(f, "{}", s),
-            Self::Io(e) => write!(f, "Error with IO: {:?}", e),
-            Self::TonicTransport(e) => write!(f, "Error with tonic (gRPC) transport: {:?}", e),
-            Self::AddrParser(e) => write!(f, "Error parsing string into a network address: {:?}", e),
-            Self::Send(s) => write!(f, "Error sending on a mpsc channel: {}", s),
-            Self::InvalidUri(e) => write!(f, "Invalid Uri: {}", e),
-            Self::NetworkTypeUnknown(network) => write!(f, "Service endpoint type unknown: {}", network),
-        }
-    }
-}
-
-impl StdError for Error {}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<TonicError> for Error {
-    fn from(err: TonicError) -> Self {
-        Self::TonicTransport(err)
-    }
-}
-
-impl From<std::net::AddrParseError> for Error {
-    fn from(err: std::net::AddrParseError) -> Self {
-        Self::AddrParser(err)
-    }
+    #[error(transparent)]
+    Generic(#[from] anyhow::Error),
 }
 
 impl<T> From<SendError<T>> for Error {
@@ -106,11 +75,5 @@ impl<T> From<SendError<T>> for Error {
             "unable to send {} on a mpsc channel",
             std::any::type_name::<T>()
         ))
-    }
-}
-
-impl From<InvalidUri> for Error {
-    fn from(err: InvalidUri) -> Self {
-        Self::InvalidUri(err)
     }
 }
