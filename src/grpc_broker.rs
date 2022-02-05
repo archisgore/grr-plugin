@@ -5,8 +5,8 @@ pub mod grpc_plugins {
 
 pub use grpc_plugins::ConnInfo;
 
-use super::Error;
-use crate::log_and_escalate_status;
+use super::error::{into_status, Error};
+use anyhow::Result;
 use async_stream::stream;
 use futures::stream::Stream;
 use grpc_plugins::grpc_broker_server::{GrpcBroker, GrpcBrokerServer};
@@ -136,9 +136,11 @@ impl GrpcBroker for GrpcBrokerImpl {
                     "{} start_stream - sending the Stream of incoming ConnInfo to someone else to broker...",
                     LOG_PREFIX
                 );
-                log_and_escalate_status!(interior
+                interior
                     .incoming_conninfo_stream_sender
-                    .send(req.into_inner()));
+                    .send(req.into_inner())
+                    .map_err(|e| e.into())
+                    .map_err(into_status)?;
 
                 Ok(Response::new(os))
             }

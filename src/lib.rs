@@ -1,15 +1,15 @@
 // A go-plugin Server to write Rust-based plugins to Golang.
 
-mod error;
+pub mod error;
 mod grpc_broker;
 mod grpc_controller;
 mod grpc_stdio;
 mod json_rpc_broker;
 mod unique_port;
 
-pub use error::Error;
+use error::Error;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context, Result};
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
@@ -67,14 +67,14 @@ impl Server {
         // using channels avoids having to do a complex sync dance using mutable globals.
         let (outgoing_conninfo_sender_transmitter, outgoing_conninfo_sender_receiver) =
             unbounded_channel();
-        log_and_escalate!(outgoing_conninfo_sender_transmitter.send(outgoing_conninfo_sender));
+        outgoing_conninfo_sender_transmitter.send(outgoing_conninfo_sender).context("Unable to send the outgoing_conninfo_sender to the transmitter. This is a tokio mpsc channel's transmitter being transmitted over another channel so it can be consumed exactly-one by someone later.")?;
 
         // Use this channel to send the channel receiver above from this constructor
         // to where it will be consumed in the "serve" method later...
         // using channels avoids having to do a complex sync dance using mutable globals.
         let (outgoing_conninfo_receiver_transmitter, outgoing_conninfo_receiver_receiver) =
             unbounded_channel();
-        log_and_escalate!(outgoing_conninfo_receiver_transmitter.send(outgoing_conninfo_receiver));
+        outgoing_conninfo_receiver_transmitter.send(outgoing_conninfo_receiver).context("Unable to send the outgoing_conninfo_receiver to the transmitter. This is a tokio mpsc channel's receiver being transmitted over another channel so it can be consumed exactly-one by someone later.")?;
 
         // Use this channel to send the channel from where we will receive ConnInfo's coming inbound
         // from the host, to the broker which will know what to do with them
@@ -89,9 +89,9 @@ impl Server {
             incoming_conninfo_stream_receiver_transmitter,
             incoming_conninfo_stream_receiver_receiver,
         ) = unbounded_channel();
-        log_and_escalate!(
-            incoming_conninfo_stream_receiver_transmitter.send(incoming_conninfo_stream_receiver)
-        );
+
+        incoming_conninfo_stream_receiver_transmitter.send(incoming_conninfo_stream_receiver)
+            .context("Unable to send the incoming_conninfo_stream_receiver to the transmitter. This is a tokio mpsc channel's receiver's receiver being transmitted over another channel so it can be consumed exactly-one by someone later. They will eventually listen to this channel to then get the actual stream over which they'll receive incoming ConnInfo's.")?;
 
         Ok(Server {
             handshake_config,
@@ -180,7 +180,7 @@ impl Server {
     {
         log::trace!("{}serve - serving over a Tcp Socket...", LOG_PREFIX);
 
-        log_and_escalate!(self.validate_magic_cookie());
+        self.validate_magic_cookie().context("Failed to validate magic cookie handshake from plugin client (i.e. host, i.e. consumer) to this Plugin.")?;
 
         let (trigger, listener) = triggered::trigger();
 
@@ -201,7 +201,12 @@ impl Server {
         log::info!("{}new - picked broker port: {}", LOG_PREFIX, service_port);
 
         let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
-        let addr = log_and_escalate!(addrstr.parse());
+        let addr = addrstr.parse().with_context(|| {
+            format!(
+                "Failed to parse address string into a valid Socket address: {}",
+                addrstr
+            )
+        })?;
 
         let handshakestr = format!(
             "{}|{}|tcp|{}:{}|grpc|",

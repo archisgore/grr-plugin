@@ -3,7 +3,7 @@
 use super::unique_port::UniquePort;
 use super::Error;
 use super::{ConnInfo, Status};
-use crate::log_and_escalate;
+use anyhow::{Context, Result};
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
@@ -116,7 +116,14 @@ impl JsonRpcBroker {
             LOG_PREFIX,
             service_id
         );
-        let server = log_and_escalate!(ServerBuilder::new(handler).start_http(bind_addr));
+        let server = ServerBuilder::new(handler)
+            .start_http(bind_addr)
+            .with_context(|| {
+                format!(
+                    "Failed to build a JSON-RPC 2.0 server bound to address {}",
+                    bind_addr
+                )
+            })?;
 
         tokio::spawn(async move {
             log::trace!("{} - newServer({}) - spawned into separate task to wait for this server to complete...", LOG_PREFIX, service_id);
@@ -150,7 +157,14 @@ impl JsonRpcBroker {
             conn_info
         );
 
-        log_and_escalate!(self.outgoing_conninfo_sender.send(Ok(conn_info)));
+        self.outgoing_conninfo_sender
+            .send(Ok(conn_info.clone()))
+            .with_context(|| {
+                format!(
+                    "Failed to send ConnInfo {:?} to the client/host/consumer of this plugin.",
+                    conn_info
+                )
+            })?;
         log::trace!(
             "{} - newServer({}) - Send ConnInfo to client-side broker",
             LOG_PREFIX,

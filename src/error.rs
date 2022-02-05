@@ -1,48 +1,13 @@
 use std::fmt::Debug;
 use thiserror::Error as ThisError;
-
 use tokio::sync::mpsc::error::SendError;
 
 use tonic::transport::Error as TonicError;
 
 use http::uri::InvalidUri;
 
-#[macro_export]
-macro_rules! function {
-    () => {{
-        fn f() {}
-        fn type_name_of<T>(_: T) -> &'static str {
-            std::any::type_name::<T>()
-        }
-        let name = type_name_of(f);
-        &name[..name.len() - 3]
-    }};
-}
-
-#[macro_export]
-macro_rules! log_and_escalate {
-    ($e:expr) => {
-        match $e {
-            Err(err) => {
-                log::error!("{:?}", err);
-                return Err(Error::from(err));
-            }
-            Ok(o) => o,
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! log_and_escalate_status {
-    ($e:expr) => {
-        match $e {
-            Err(err) => {
-                log::error!("{:?}", err);
-                return Err(tonic::Status::unknown(format!("{:?}", err)));
-            }
-            Ok(o) => o,
-        }
-    };
+pub fn into_status(err: Error) -> tonic::Status {
+    tonic::Status::unknown(format!("{}", err))
 }
 
 #[derive(Debug, ThisError)]

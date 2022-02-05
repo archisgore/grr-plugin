@@ -3,7 +3,8 @@ pub mod grpc_plugins {
     tonic::include_proto!("plugin");
 }
 
-use crate::log_and_escalate_status;
+use super::error::into_status;
+use anyhow::{Context, Result};
 use async_stream::stream;
 use futures::stream::Stream;
 use gag::BufferRedirect;
@@ -37,11 +38,17 @@ impl GrpcStdioImpl {
             "{}Gagging stdout and stderr to a buffer for redirection to plugin's host.",
             LOG_PREFIX
         );
-        let stdoutbuf = log_and_escalate_status!(BufferRedirect::stdout());
-        let stderrbuf = log_and_escalate_status!(BufferRedirect::stderr());
 
+        let stdoutbuf = BufferRedirect::stdout()
+            .context("Failed to create a BufferRedirec from stdout")
+            .map_err(|e| e.into())
+            .map_err(into_status)?;
         let stdout_stream = GrpcStdioImpl::new_stream("stdout", Channel::Stdout as i32, stdoutbuf);
 
+        let stderrbuf = BufferRedirect::stderr()
+            .context("Failed to create a BufferRedirec from stderr")
+            .map_err(|e| e.into())
+            .map_err(into_status)?;
         let stderr_stream = GrpcStdioImpl::new_stream("stderr", Channel::Stderr as i32, stderrbuf);
 
         let merged_stream = stdout_stream.merge(stderr_stream);
