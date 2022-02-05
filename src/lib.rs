@@ -108,7 +108,7 @@ impl Server {
             None => {
                 let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
                 log::error!("{}", err);
-                return Err(Error::Generic(err));
+                return Err(Error::Other(err));
             }
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
@@ -121,7 +121,7 @@ impl Server {
             None => {
                 let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's  receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.", LOG_PREFIX);
                 log::error!("{}", err);
-                return Err(Error::Generic(err));
+                return Err(Error::Other(err));
             }
             Some(outgoing_conninfo_sender) => outgoing_conninfo_sender,
         };
@@ -194,7 +194,7 @@ impl Server {
                 let err =
                     anyhow!("Unable to find a free unused TCP port to bind the gRPC server to");
                 log::error!("{}", err);
-                return Err(Error::Generic(err));
+                return Err(Error::Other(err));
             }
         };
 
@@ -219,7 +219,7 @@ impl Server {
 
         let outgoing_conninfo_receiver = match self.outgoing_conninfo_receiver_receiver.recv().await {
             Some(outgoing_conninfo_receiver) => outgoing_conninfo_receiver,
-            None => return Err(Error::Generic(anyhow!("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method."))),
+            None => return Err(Error::Other(anyhow!("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method."))),
         };
 
         log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);

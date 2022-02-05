@@ -66,7 +66,7 @@ pub enum Error {
     #[error("Service endpoint type unknown: {0}")]
     NetworkTypeUnknown(String),
     #[error(transparent)]
-    Generic(#[from] anyhow::Error),
+    Other(#[from] anyhow::Error),
 }
 
 impl<T> From<SendError<T>> for Error {
