@@ -2,9 +2,9 @@
 
 pub mod error;
 mod grpc_broker;
+mod grpc_broker_service;
 mod grpc_controller;
 mod grpc_stdio;
-mod json_rpc_broker;
 mod unique_port;
 pub mod unix;
 
@@ -21,8 +21,8 @@ use tonic::transport::NamedService;
 use tower::Service;
 use unix::TempSocket;
 
-pub use grpc_broker::grpc_plugins::ConnInfo;
-pub use json_rpc_broker::JsonRpcBroker;
+pub use grpc_broker::GRpcBroker;
+pub use grpc_broker_service::grpc_plugins::ConnInfo;
 pub use tonic::{Status, Streaming};
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -102,7 +102,7 @@ impl Server {
         })
     }
 
-    pub async fn jsonrpc_broker(&mut self) -> Result<JsonRpcBroker, Error> {
+    pub async fn grpc_broker(&mut self) -> Result<GRpcBroker, Error> {
         let outgoing_conninfo_sender = match self.outgoing_conninfo_sender_receiver.recv().await {
             None => {
                 let err = anyhow!("jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?");
@@ -127,7 +127,7 @@ impl Server {
 
         // create the JSON-RPC 2.0 server broker
         log::trace!("Creating the JSON RPC 2.0 Server Broker.",);
-        let jsonrpc_broker = JsonRpcBroker::new(
+        let jsonrpc_broker = GRpcBroker::new(
             unique_port::UniquePort::new(),
             outgoing_conninfo_sender,
             incoming_conninfo_stream_receiver,
@@ -203,7 +203,7 @@ impl Server {
 
         log::info!("Creating a GRPC Broker Server.");
         // mspc Senders can be cloned. Receivers need all the attention and queueing.
-        let broker_server = grpc_broker::new_server(
+        let broker_server = grpc_broker_service::new_server(
             outgoing_conninfo_receiver,
             self.incoming_conninfo_stream_sender.clone(),
         )

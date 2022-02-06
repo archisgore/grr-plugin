@@ -1,140 +1,287 @@
-// Copied from: https://github.com/hashicorp/go-plugin/blob/master/grpc_controller.go
-pub mod grpc_plugins {
-    tonic::include_proto!("plugin");
-}
-
-pub use grpc_plugins::ConnInfo;
-
-use super::error::{into_status, Error};
-use anyhow::Result;
-use async_stream::stream;
-use futures::stream::Stream;
-use grpc_plugins::grpc_broker_server::{GrpcBroker, GrpcBrokerServer};
-use std::ops::DerefMut;
-use std::pin::Pin;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::RwLock;
+// Because of course something using Golang and gRPC has to be overtly complex in new and innovative ways.
+// The secondary streams brokered by GRPC Broker are JSON-RPC 2.0, wouldn't you know?
+use super::unique_port::UniquePort;
+use super::unix::{incoming_from_path, TempSocket};
+use super::Error;
+use super::{ConnInfo, Status};
+use anyhow::{Context, Result};
+use async_recursion::async_recursion;
+use futures::stream::StreamExt;
+use hyper::{
+    service::{make_service_fn as make_hyper_service_fn, service_fn as hyper_service_fn},
+    Body, Request, Response, Server,
+};
+use hyperlocal::UnixServerExt;
+use jsonrpc_http_server::jsonrpc_core::IoHandler;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UnixStream;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
+use tonic::body::BoxBody;
 use tonic::transport::NamedService;
-use tonic::{async_trait, Request, Response, Status, Streaming};
+use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::Streaming;
+use tower::service_fn as tower_service_fn;
+use tower::Service;
 
-pub async fn new_server(
-    conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
-    incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
-) -> Result<GrpcBrokerServer<GrpcBrokerImpl>, Error> {
-    log::trace!("new_server - called.");
+type ServiceId = u32;
 
-    log::trace!("new_server - creating GrpcBrokerImpl.");
-    let broker = GrpcBrokerImpl::new(conn_info_receiver, incoming_conninfo_stream_sender)?;
+// Brokers connections by service_id
+// Not necessarily threadsafe, so caller should Arc<RwLock<>> this,
+// but I don't know how you'd get multiple mutable references without that anyway.
+pub struct GRpcBroker {
+    unique_port: UniquePort,
+    next_id: Mutex<u32>,
 
-    log::trace!("new_server - Returning a new broker as well as a Sender to send ConnInfo to the Plugin Client.");
-    Ok(GrpcBrokerServer::new(broker))
+    listener: triggered::Listener,
+
+    // Send the client information on new services and their endpoints
+    outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
+
+    // Services on the host-side that we've been informed of
+    // The optional ConnInfo entry allows us to park a None
+    // against a ServiceId that was previously used, so it won't get
+    // reused.
+    host_services: Arc<Mutex<HashMap<ServiceId, Option<ConnInfo>>>>,
 }
 
-struct GrpcBrokerInterior {
-    // This is how the outgoing stream will be pulled by consumer
-    outgoing_conninfo_receiver_receiver:
-        UnboundedReceiver<<GrpcBrokerImpl as GrpcBroker>::StartStreamStream>,
-    incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
-}
-
-pub struct GrpcBrokerImpl {
-    interior: RwLock<GrpcBrokerInterior>,
-}
-
-impl NamedService for GrpcBrokerImpl {
-    const NAME: &'static str = "plugin.GRPCBroker";
-}
-
-impl GrpcBrokerImpl {
+impl GRpcBroker {
     pub fn new(
-        conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
-        incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
-    ) -> Result<GrpcBrokerImpl, Error> {
-        log::trace!("GrpcBrokerImpl::new - called.");
+        unique_port: UniquePort,
+        outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
+        mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
+        listener: triggered::Listener,
+    ) -> Self {
+        log::trace!("called");
+        let host_services = Arc::new(Mutex::new(HashMap::new()));
 
-        log::trace!("GrpcBrokerImpl::new - creating outgoing stream.");
-        let outgoing_stream = Self::new_outgoing_stream(conn_info_receiver);
-
-        // we use a channel to provide one-way send between the constructor where we have this outgoing stream,
-        // and a gRPC method stream_start where it will be consumed.
-        log::trace!("GrpcBrokerImpl::new - sending outgoing stream to an inner stream from which it can be pulled later...");
-        let (outgoing_conninfo_receiver_transmitter, outgoing_conninfo_receiver_receiver) =
-            unbounded_channel();
-        outgoing_conninfo_receiver_transmitter.send(outgoing_stream)?;
-
-        log::trace!(
-            "GrpcBrokerImpl::new - Creating a new GrpcBrokerImpl with interior mutability."
-        );
-        Ok(GrpcBrokerImpl {
-            interior: RwLock::new(GrpcBrokerInterior {
-                outgoing_conninfo_receiver_receiver,
-                incoming_conninfo_stream_sender,
-            }),
-        })
-    }
-
-    fn new_outgoing_stream(
-        mut conn_info_receiver: UnboundedReceiver<Result<ConnInfo, Status>>,
-    ) -> <Self as GrpcBroker>::StartStreamStream {
-        log::trace!("new_outgoing_stream called.");
-
-        let s = stream! {
-            log::trace!("outgoing_stream repeater initialized.");
-            loop {
-                log::trace!("outgoing_stream loop iteration");
-                match conn_info_receiver.recv().await {
-                    Some(result) => {
-                        log::trace!("Sending Result<ConnInfo> to outgoing_stream: {:?}.", result);
-                        yield result
-                    },
-                    None => {
-                        let errmsg = "incoming receiver for outgoing_stream received an empty item. Unexpected.";
-                        log::error!("{errmsg}");
-                        yield Err(Status::unknown(errmsg))
-                    },
+        log::trace!("spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...");
+        let host_services_for_closure = host_services.clone();
+        tokio::spawn(async move {
+            log::trace!(
+                "Inside spawn'd process. Waiting for the stream of ConnInfo's to be available...."
+            );
+            let incoming_conninfo_stream = match incoming_conninfo_stream_receiver_receiver
+                .recv()
+                .await
+            {
+                Some(incoming_conninfo_stream) => incoming_conninfo_stream,
+                None => {
+                    log::error!("inside spawn'd process to wait for a Stream of ConnInfo's, the stream was None, which is unexpected, since it is expected instead to block indefinitely until such a stream is available.");
+                    return;
                 }
-            }
-        };
+            };
 
-        let dyn_stream: Pin<
-            Box<dyn Stream<Item = Result<ConnInfo, Status>> + Sync + Send + 'static>,
-        > = Box::pin(s);
+            Self::blocking_incoming_conn(incoming_conninfo_stream, host_services_for_closure).await
+        });
 
-        log::trace!("outgoing stream created and returning...");
-        dyn_stream
+        Self {
+            next_id: Mutex::new(1), // start next id at a number where it won't conflict with other services
+            unique_port,
+            outgoing_conninfo_sender,
+            host_services,
+            listener,
+        }
     }
-}
 
-#[async_trait]
-impl GrpcBroker for GrpcBrokerImpl {
-    type StartStreamStream =
-        Pin<Box<dyn Stream<Item = Result<ConnInfo, Status>> + Sync + Send + 'static>>;
-
-    async fn start_stream(
-        &self,
-        req: Request<Streaming<ConnInfo>>,
-    ) -> Result<Response<Self::StartStreamStream>, Status> {
+    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
+    where
+        S: Service<Request<Body>, Response = Response<BoxBody>>
+            + NamedService
+            + Clone
+            + Send
+            + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Error:
+            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
         log::trace!("called");
 
-        let mut interior_write_guard = self.interior.write().await;
-        let interior = interior_write_guard.deref_mut();
+        // get next service_id, increment the underlying value, and release lock in the block
+        let service_id = self.next_service_id().await;
+        log::debug!("newServer - created next service_id: {}", service_id);
 
-        match interior.outgoing_conninfo_receiver_receiver.recv().await {
-            None => {
-                let errmsg = "outgoing_stream was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .take() it?";
-                log::error!("{}", errmsg);
-                Err(Status::unknown(errmsg))
+        let temp_socket = TempSocket::new()
+        .with_context(|| format!("newServer({}) Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server", service_id))?;
+        let socket_path = temp_socket.socket_filename()
+            .with_context(|| format!("newServer({}) Failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server", service_id))?;
+        log::info!(
+            "newServer({}) Created a temp socket path: {}",
+            service_id,
+            socket_path
+        );
+
+        let listener = self.listener.clone();
+
+        tokio::spawn(async move {
+            log::info!(
+                "newServer({}) - spawned into separate task to wait for this server to complete...",
+                service_id
+            );
+
+            let socket_path = temp_socket.socket_filename()
+            .with_context(|| format!("newServer({}) Inside spawned grpc server, failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server", service_id)).unwrap();
+
+            // create incoming stream from unix socket above...
+            let incoming_stream_from_socket = incoming_from_path(socket_path.as_str()).await
+                .with_context(|| format!("newServer({}) Inside spawned grpc server, unable to open incoming UnixStream from socket {}", service_id, socket_path.as_str())).unwrap();
+            log::trace!("Inside spawned grpc server, created Incoming unix stream from the socket");
+
+            log::info!("Inside spawned grpc server, starting a new grpc service...");
+            let grpc_service_future = tonic::transport::Server::builder()
+                .add_service(plugin)
+                .serve_with_incoming_shutdown(incoming_stream_from_socket, async {
+                    listener.await
+                });
+
+            grpc_service_future
+                .await
+                .with_context(|| {
+                    format!(
+                        "newServer({}) Inside spawned grpc server, service future failed",
+                        service_id
+                    )
+                })
+                .unwrap();
+
+            log::info!(
+                "newServer({}) Inside spawned grpc server, exiting task. Service has ended.",
+                service_id
+            );
+        });
+
+        log::trace!(
+            "newServer({}) - Creating ConnInfo for this service to send to the client-side broker.",
+            service_id
+        );
+        let conn_info = ConnInfo {
+            network: "unix".to_string(),
+            address: socket_path,
+            service_id,
+        };
+
+        log::trace!(
+            "newServer({}) - Created ConnInfo for this service: {:?}",
+            service_id,
+            conn_info
+        );
+
+        self.outgoing_conninfo_sender
+            .send(Ok(conn_info.clone()))
+            .with_context(|| {
+                format!(
+                    "Failed to send ConnInfo {:?} to the client/host/consumer of this plugin.",
+                    conn_info
+                )
+            })?;
+        log::trace!(
+            "newServer({}) - Sent ConnInfo to client-side broker",
+            service_id
+        );
+
+        Ok(service_id)
+    }
+
+    pub async fn next_service_id(&mut self) -> u32 {
+        let mut next_id = self.next_id.lock().await;
+        let service_id = *next_id;
+        *next_id += 1;
+        service_id
+    }
+
+    pub fn get_unused_port(&mut self) -> Option<u16> {
+        self.unique_port.get_unused_port()
+    }
+
+    pub async fn dial_to_host_service(&mut self, service_id: ServiceId) -> Result<Channel, Error> {
+        let conn_info = self.get_incoming_conninfo_retry(service_id, 5).await?;
+
+        let channel = match conn_info.network.as_str() {
+            "tcp" => Endpoint::try_from(conn_info.address)?.connect().await?,
+            "unix" => {
+                // Copied from: https://github.com/hyperium/tonic/blob/master/examples/src/uds/client.rs
+                Endpoint::try_from("http://[::]:50051")?
+                    .connect_with_connector(tower_service_fn(move |_: Uri| {
+                        // Connect to a Uds socket
+                        // The clone ensures this closure doesn't consume the environment.
+                        UnixStream::connect(conn_info.address.clone())
+                    }))
+                    .await?
             }
-            Some(os) => {
-                log::trace!("sending the Stream of incoming ConnInfo to someone else to broker...");
-                interior
-                    .incoming_conninfo_stream_sender
-                    .send(req.into_inner())
-                    .map_err(|e| e.into())
-                    .map_err(into_status)?;
+            s => return Err(Error::NetworkTypeUnknown(s.to_string())),
+        };
 
-                Ok(Response::new(os))
+        Ok(channel)
+    }
+
+    #[async_recursion]
+    async fn get_incoming_conninfo_retry(
+        &mut self,
+        service_id: ServiceId,
+        retry_count: usize,
+    ) -> Result<ConnInfo, Error> {
+        match self.get_incoming_conninfo(service_id).await {
+            None => match retry_count {
+                0 => Err(Error::ServiceIdDoesNotExist(service_id)),
+                _c => {
+                    sleep(Duration::from_secs(1)).await;
+                    self.get_incoming_conninfo_retry(service_id, retry_count - 1)
+                        .await
+                }
+            },
+            Some(conn_info) => Ok(conn_info),
+        }
+    }
+
+    //https://github.com/hashicorp/go-plugin/blob/master/grpc_broker.go#L371
+    async fn get_incoming_conninfo(&mut self, service_id: ServiceId) -> Option<ConnInfo> {
+        // hold lock for duration of this function, so we can atomically park a None
+        // in case we pulled a ConnInfo out.
+        let mut hs = self.host_services.lock().await;
+
+        match hs.remove(&service_id) {
+            None | Some(None) => None,
+            Some(Some(conn_info)) => {
+                // if some conn_info existed, replace it with None before exiting
+                hs.insert(service_id, None);
+                Some(conn_info)
             }
         }
+    }
+
+    // This function will run forever. tokio::spawn this!
+    async fn blocking_incoming_conn(
+        mut stream: Streaming<ConnInfo>,
+        host_services: Arc<Mutex<HashMap<ServiceId, Option<ConnInfo>>>>,
+    ) {
+        log::info!("blocking_incoming_conn - perpetually listening for incoming ConnInfo's",);
+        while let Some(conn_info_result) = stream.next().await {
+            match conn_info_result {
+                Err(e) => {
+                    log::error!(
+                        "blocking_incoming_conn - an error occurred reading from the stream: {:?}",
+                        e
+                    );
+                    break; //out of the while loop
+                }
+                Ok(conn_info) => {
+                    log::info!("Received conn_info: {:?}", conn_info);
+
+                    let mut hs = host_services.lock().await;
+                    log::trace!("Write-locked the host services to add the new ConnInfo",);
+
+                    log::trace!(
+                        "Only creating a new entry if one doesn't exist for this ServiceId: {}",
+                        conn_info.service_id
+                    );
+                    hs.entry(conn_info.service_id)
+                        .or_insert_with(|| Some(conn_info));
+                }
+            }
+        }
+        log::info!("blocking_incoming_conn - exiting due to stream returning None or an error",);
     }
 }
