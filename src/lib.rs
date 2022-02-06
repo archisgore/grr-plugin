@@ -45,6 +45,8 @@ pub struct Server {
     incoming_conninfo_stream_sender: UnboundedSender<Streaming<ConnInfo>>,
     incoming_conninfo_stream_receiver_receiver:
         UnboundedReceiver<UnboundedReceiver<Streaming<ConnInfo>>>,
+    trigger: triggered::Trigger,
+    listener: triggered::Listener,
 }
 
 impl Server {
@@ -86,6 +88,8 @@ impl Server {
         incoming_conninfo_stream_receiver_transmitter.send(incoming_conninfo_stream_receiver)
             .context("Unable to send the incoming_conninfo_stream_receiver to the transmitter. This is a tokio mpsc channel's receiver's receiver being transmitted over another channel so it can be consumed exactly-one by someone later. They will eventually listen to this channel to then get the actual stream over which they'll receive incoming ConnInfo's.")?;
 
+        let (trigger, listener) = triggered::trigger();
+
         Ok(Server {
             handshake_config,
             protocol_version,
@@ -93,6 +97,8 @@ impl Server {
             outgoing_conninfo_receiver_receiver,
             incoming_conninfo_stream_sender,
             incoming_conninfo_stream_receiver_receiver,
+            trigger,
+            listener,
         })
     }
 
@@ -125,6 +131,7 @@ impl Server {
             unique_port::UniquePort::new(),
             outgoing_conninfo_sender,
             incoming_conninfo_stream_receiver,
+            self.listener.clone(),
         );
 
         log::info!("Created JSON RPC 2.0 Server Broker.");
@@ -169,8 +176,6 @@ impl Server {
 
         self.validate_magic_cookie().context("Failed to validate magic cookie handshake from plugin client (i.e. host, i.e. consumer) to this Plugin.")?;
 
-        let (trigger, listener) = triggered::trigger();
-
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<S>().await;
         log::info!("gRPC Health Service created.");
@@ -205,10 +210,11 @@ impl Server {
         .await?;
 
         log::info!("Creating a GRPC Controller Server.");
-        let controller_server = grpc_controller::new_server(trigger);
+        let controller_server = grpc_controller::new_server(self.trigger.clone());
         log::info!("Creating a GRPC Stdio Server.");
         let stdio_server = grpc_stdio::new_server();
 
+        let listener = self.listener.clone();
         log::info!("Starting service...");
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)

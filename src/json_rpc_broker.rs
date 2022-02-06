@@ -1,7 +1,7 @@
 // Because of course something using Golang and gRPC has to be overtly complex in new and innovative ways.
 // The secondary streams brokered by GRPC Broker are JSON-RPC 2.0, wouldn't you know?
 use super::unique_port::UniquePort;
-use super::unix::TempSocket;
+use super::unix::{incoming_from_path, TempSocket};
 use super::Error;
 use super::{ConnInfo, Status};
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use async_recursion::async_recursion;
 use futures::stream::StreamExt;
 use hyper::{
     service::{make_service_fn as make_hyper_service_fn, service_fn as hyper_service_fn},
-    Body, Response, Server,
+    Body, Request, Response, Server,
 };
 use hyperlocal::UnixServerExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
@@ -20,9 +20,12 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use tonic::body::BoxBody;
+use tonic::transport::NamedService;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn as tower_service_fn;
+use tower::Service;
 
 type ServiceId = u32;
 
@@ -32,6 +35,8 @@ type ServiceId = u32;
 pub struct JsonRpcBroker {
     unique_port: UniquePort,
     next_id: Mutex<u32>,
+
+    listener: triggered::Listener,
 
     // Send the client information on new services and their endpoints
     outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
@@ -48,6 +53,7 @@ impl JsonRpcBroker {
         unique_port: UniquePort,
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
+        listener: triggered::Listener,
     ) -> Self {
         log::trace!("called");
         let host_services = Arc::new(Mutex::new(HashMap::new()));
@@ -77,7 +83,72 @@ impl JsonRpcBroker {
             unique_port,
             outgoing_conninfo_sender,
             host_services,
+            listener,
         }
+    }
+
+    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
+    where
+        S: Service<Request<Body>, Response = Response<BoxBody>>
+            + NamedService
+            + Clone
+            + Send
+            + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Error:
+            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
+        log::trace!("called");
+
+        // get next service_id, increment the underlying value, and release lock in the block
+        let service_id = self.next_service_id().await;
+        log::debug!("newServer - created next service_id: {}", service_id);
+
+        let temp_socket = TempSocket::new()
+        .with_context(|| format!("newServer({}) Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server", service_id))?;
+        let socket_path = temp_socket.socket_filename()
+            .with_context(|| format!("newServer({}) Failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server", service_id))?;
+        log::info!(
+            "newServer({}) Created a temp socket path: {}",
+            service_id,
+            socket_path
+        );
+
+        let listener = self.listener.clone();
+
+        tokio::spawn(async move {
+            log::info!(
+                "newServer({}) - spawned into separate task to wait for this server to complete...",
+                service_id
+            );
+
+            let socket_path = temp_socket.socket_filename()
+            .with_context(|| format!("newServer({}) Inside spawned grpc server, failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server", service_id)).unwrap();
+
+            // create incoming stream from unix socket above...
+            let incoming_stream_from_socket = incoming_from_path(socket_path.as_str()).await
+                .with_context(|| format!("newServer({}) Inside spawned grpc server, unable to open incoming UnixStream from socket {}", service_id, socket_path.as_str())).unwrap();
+            log::trace!("Inside spawned grpc server, created Incoming unix stream from the socket");
+
+            log::info!("Inside spawned grpc server, starting a new grpc service...");
+            let grpc_service_future = tonic::transport::Server::builder()
+                .add_service(plugin)
+                .serve_with_incoming_shutdown(incoming_stream_from_socket, async {
+                    listener.await
+                });
+
+            grpc_service_future
+                .await
+                .with_context(|| {
+                    format!(
+                        "newServer({}) Inside spawned grpc server, service future failed",
+                        service_id
+                    )
+                })
+                .unwrap();
+        });
+
+        Ok(service_id)
     }
 
     pub async fn new_server(&mut self, _handler: IoHandler) -> Result<ServiceId, Error> {
@@ -88,27 +159,50 @@ impl JsonRpcBroker {
         log::debug!("newServer - created next service_id: {}", service_id);
 
         let temp_socket = TempSocket::new()
-            .context("Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server")?;
+        .with_context(|| format!("newServer({}) Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server", service_id))?;
         let socket_path = temp_socket.socket_filename()
-            .context("Failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server")?;
-        log::info!("newServer({}) Created a temp socket path: {}", service_id, socket_path);
+            .with_context(|| format!("newServer({}) Failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server", service_id))?;
+        log::info!(
+            "newServer({}) Created a temp socket path: {}",
+            service_id,
+            socket_path
+        );
 
         let make_service = make_hyper_service_fn(|_| async {
-            Ok::<_, hyper::Error>(hyper_service_fn(|req| async move {
-                log::info!("Request into hyperlocal: {:?}", req);
+            Ok::<_, hyper::Error>(hyper_service_fn(|req: Request<Body>| async move {
+                log::info!("Request into hyperlocal FOOBAR!!!!: {:?}", req);
+                let body_string: String = String::from_utf8(
+                    hyper::body::to_bytes(req.into_body())
+                        .await
+                        .expect("Request into Body failed")
+                        .to_vec(),
+                )
+                .expect("Body bytes to UTF8 string failed");
+                log::info!("Request into hyperlocal before body");
+                log::error!("Request into hyperlocal::Body: {}", body_string);
                 Ok::<_, hyper::Error>(Response::new(Body::from("Hello World")))
             }))
         });
         log::info!("Created a new hello world service");
 
-        log::info!("newServer({}) Binding HTTP Server to path: {:?}", service_id, socket_path);
-        let server = Server::bind_unix(socket_path.clone())?;
-
         tokio::spawn(async move {
-            log::trace!(
+            log::info!(
                 "newServer({}) - spawned into separate task to wait for this server to complete...",
                 service_id
             );
+
+            // This forces temp_socket to me moved here and owned, so it won't go
+            // out of scope (and this deleted) until the spawned server ends.
+            let socket_path = temp_socket.socket_filename()
+                .context("newServer({}) - Inside spawned thread, failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server").unwrap();
+
+            log::info!(
+                "newServer({}) Inside spawned thread, binding HTTP Server to path: {:?}",
+                service_id,
+                socket_path
+            );
+            let server = Server::bind_unix(socket_path).unwrap();
+
             if let Err(err) = server.serve(make_service).await {
                 log::error!(
                     "newServer({}) - Server exited with error: {}",
