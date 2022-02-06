@@ -1,7 +1,7 @@
 // Because of course something using Golang and gRPC has to be overtly complex in new and innovative ways.
 // The secondary streams brokered by GRPC Broker are JSON-RPC 2.0, wouldn't you know?
 use super::unique_port::UniquePort;
-use super::unix;
+use super::unix::TempSocket;
 use super::Error;
 use super::{ConnInfo, Status};
 use anyhow::{Context, Result};
@@ -87,8 +87,11 @@ impl JsonRpcBroker {
         let service_id = self.next_service_id().await;
         log::debug!("newServer - created next service_id: {}", service_id);
 
-        let socket_path = unix::temp_socket_path().await?;
-        log::info!("Created a temp socket path: {}", socket_path);
+        let temp_socket = TempSocket::new()
+            .context("Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server")?;
+        let socket_path = temp_socket.socket_filename()
+            .context("Failed to get a temporary socket filename from the temp socket for opening a new JSON-RPC 2.0 server")?;
+        log::info!("newServer({}) Created a temp socket path: {}", service_id, socket_path);
 
         let make_service = make_hyper_service_fn(|_| async {
             Ok::<_, hyper::Error>(hyper_service_fn(|req| async move {
@@ -98,7 +101,7 @@ impl JsonRpcBroker {
         });
         log::info!("Created a new hello world service");
 
-        log::info!("Binding HTTP Server to path: {:?}", socket_path);
+        log::info!("newServer({}) Binding HTTP Server to path: {:?}", service_id, socket_path);
         let server = Server::bind_unix(socket_path.clone())?;
 
         tokio::spawn(async move {

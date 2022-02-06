@@ -19,6 +19,7 @@ use std::marker::Send;
 use tonic::body::BoxBody;
 use tonic::transport::NamedService;
 use tower::Service;
+use unix::TempSocket;
 
 pub use grpc_broker::grpc_plugins::ConnInfo;
 pub use json_rpc_broker::JsonRpcBroker;
@@ -174,7 +175,10 @@ impl Server {
         health_reporter.set_serving::<S>().await;
         log::info!("gRPC Health Service created.");
 
-        let socket_path = unix::temp_socket_path().await?;
+        let temp_socket = TempSocket::new()
+            .context("Failed to create a new TempSocket for opening the main gRPC listener to")?;
+        let socket_path = temp_socket.socket_filename()
+            .context("Failed to get a temporary socket filename from the temp socket for opening the main gRPC listener to")?;
         log::trace!("Created new temp socket: {}", socket_path);
 
         let handshakestr = format!(
