@@ -17,8 +17,6 @@ use tokio::time::{sleep, Duration};
 use tokio_stream::StreamExt;
 use tonic::{async_trait, Request, Response, Status};
 
-const LOG_PREFIX: &str = "GrrPlugin::GrpcStdio: ";
-
 const CONSOLE_POLL_SLEEP_MILLIS: u64 = 500;
 
 pub fn new_server() -> GrpcStdioServer<GrpcStdioImpl> {
@@ -30,14 +28,8 @@ pub struct GrpcStdioImpl {}
 
 impl GrpcStdioImpl {
     fn new_combined_stream() -> Result<<Self as GrpcStdio>::StreamStdioStream, Status> {
-        log::trace!(
-            "{}new_inner_stream called. Asked for a stream of stdout and stderr",
-            LOG_PREFIX
-        );
-        log::info!(
-            "{}Gagging stdout and stderr to a buffer for redirection to plugin's host.",
-            LOG_PREFIX
-        );
+        log::trace!("new_inner_stream called. Asked for a stream of stdout and stderr");
+        log::info!("Gagging stdout and stderr to a buffer for redirection to plugin's host.",);
 
         let stdoutbuf = BufferRedirect::stdout()
             .context("Failed to create a BufferRedirec from stdout")
@@ -63,16 +55,16 @@ impl GrpcStdioImpl {
     ) -> impl Stream<Item = Result<StdioData, Status>> {
         stream! {
             loop {
-                log::trace!("{}beginning next iteration of {} reading and streaming...", LOG_PREFIX, stream_name);
+                log::trace!("beginning next iteration of {} reading and streaming...", stream_name);
                 let mut readbuf = String::new();
                 match redirected_buf.read_to_string(&mut readbuf) {
                     Ok(len) => match len{
                         0 => {
-                            log::trace!("{}{} had zero bytes. Sleeping to avoid polling...", LOG_PREFIX, stream_name);
+                            log::trace!("{} had zero bytes. Sleeping to avoid polling...", stream_name);
                             sleep(Duration::from_millis(CONSOLE_POLL_SLEEP_MILLIS)).await;
                         },
                         _ => {
-                            log::trace!("{}Sending {} {} bytes of data: {}", LOG_PREFIX, stream_name, len, readbuf);
+                            log::trace!("Sending {} {} bytes of data: {}", stream_name, len, readbuf);
                             yield Ok(StdioData{
                                 channel,
                                 data: readbuf.into_bytes(),
@@ -80,7 +72,7 @@ impl GrpcStdioImpl {
                         },
                     },
                     Err(e) => {
-                        log::error!("{}Error reading {} data: {:?}", LOG_PREFIX, stream_name, e);
+                        log::error!("Error reading {} data: {:?}", stream_name, e);
                         yield Err(Status::unknown(format!("Error reading from Stderr of plugin's process: {:?}", e)));
                     },
                 }
@@ -98,14 +90,11 @@ impl GrpcStdio for GrpcStdioImpl {
         &self,
         _req: Request<()>,
     ) -> Result<Response<Self::StreamStdioStream>, Status> {
-        log::trace!("{} stream_stdio called.", LOG_PREFIX);
+        log::trace!("stream_stdio called.");
 
         let s = GrpcStdioImpl::new_combined_stream()?;
 
-        log::trace!(
-            "{} stream_stdio responding with a stream of StdioData.",
-            LOG_PREFIX
-        );
+        log::trace!("stream_stdio responding with a stream of StdioData.",);
 
         Ok(Response::new(s))
     }

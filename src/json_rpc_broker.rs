@@ -19,8 +19,6 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn;
 
-const LOG_PREFIX: &str = "JsonRpcBroker:: ";
-
 type ServiceId = u32;
 
 // Brokers connections by service_id
@@ -54,20 +52,22 @@ impl JsonRpcBroker {
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
     ) -> Self {
-        log::trace!("{} - new - called", LOG_PREFIX);
+        log::trace!("called");
         let host_services = Arc::new(Mutex::new(HashMap::new()));
 
-        log::trace!("{} - new - spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...", LOG_PREFIX);
+        log::trace!("spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...");
         let host_services_for_closure = host_services.clone();
         tokio::spawn(async move {
-            log::trace!("{} - new - Inside spawn'd process. Waiting for the stream of ConnInfo's to be available....", LOG_PREFIX);
+            log::trace!(
+                "Inside spawn'd process. Waiting for the stream of ConnInfo's to be available...."
+            );
             let incoming_conninfo_stream = match incoming_conninfo_stream_receiver_receiver
                 .recv()
                 .await
             {
                 Some(incoming_conninfo_stream) => incoming_conninfo_stream,
                 None => {
-                    log::error!("{} - new - inside spawn'd process to wait for a Stream of ConnInfo's, the stream was None, which is unexpected, since it is expected instead to block indefinitely until such a stream is available.", LOG_PREFIX);
+                    log::error!("inside spawn'd process to wait for a Stream of ConnInfo's, the stream was None, which is unexpected, since it is expected instead to block indefinitely until such a stream is available.");
                     return;
                 }
             };
@@ -86,15 +86,11 @@ impl JsonRpcBroker {
     }
 
     pub async fn new_server(&mut self, handler: IoHandler) -> Result<ServiceId, Error> {
-        log::trace!("{} - newServer called", LOG_PREFIX);
+        log::trace!("called");
         // get next service_id, increment the underlying value, and release lock in the block
         let service_id = self.next_service_id().await;
 
-        log::debug!(
-            "{} - newServer - created next service_id: {}",
-            LOG_PREFIX,
-            service_id
-        );
+        log::debug!("newServer - created next service_id: {}", service_id);
         // let's find an unusued port
         let service_port = match self.unique_port.get_unused_port() {
             Some(p) => p,
@@ -103,19 +99,14 @@ impl JsonRpcBroker {
 
         let bind_addrstr = format!("{}:{}", self.bind_ip, service_port);
         log::trace!(
-            "{} - newServer({}) - created bind address string: {}",
-            LOG_PREFIX,
+            "newServer({}) - created bind address string: {}",
             service_id,
             bind_addrstr
         );
 
         let bind_addr = &bind_addrstr.parse()?;
 
-        log::trace!(
-            "{} - newServer({}) - about to create server...",
-            LOG_PREFIX,
-            service_id
-        );
+        log::trace!("newServer({}) - about to create server...", service_id);
         let server = ServerBuilder::new(handler)
             .start_http(bind_addr)
             .with_context(|| {
@@ -126,24 +117,28 @@ impl JsonRpcBroker {
             })?;
 
         tokio::spawn(async move {
-            log::trace!("{} - newServer({}) - spawned into separate task to wait for this server to complete...", LOG_PREFIX, service_id);
+            log::trace!(
+                "newServer({}) - spawned into separate task to wait for this server to complete...",
+                service_id
+            );
             server.wait();
             log::info!(
-                "{} - newServer({}) - server.wait() exited. Server has stopped",
-                LOG_PREFIX,
+                "newServer({}) - server.wait() exited. Server has stopped",
                 service_id
             );
         });
 
         let advertise_addrstr = format!("{}:{}", self.advertise_ip, service_port);
         log::trace!(
-            "{} - newServer({}) - created advertise address string: {}",
-            LOG_PREFIX,
+            "newServer({}) - created advertise address string: {}",
             service_id,
             advertise_addrstr
         );
 
-        log::trace!("{} - newServer({}) - Creating ConnInfo for this service to send to the client-side broker.", LOG_PREFIX, service_id);
+        log::trace!(
+            "newServer({}) - Creating ConnInfo for this service to send to the client-side broker.",
+            service_id
+        );
         let conn_info = ConnInfo {
             network: "tcp".to_string(),
             address: advertise_addrstr,
@@ -151,8 +146,7 @@ impl JsonRpcBroker {
         };
 
         log::trace!(
-            "{} - newServer({}) - Created ConnInfo for this service: {:?}",
-            LOG_PREFIX,
+            "newServer({}) - Created ConnInfo for this service: {:?}",
             service_id,
             conn_info
         );
@@ -166,16 +160,11 @@ impl JsonRpcBroker {
                 )
             })?;
         log::trace!(
-            "{} - newServer({}) - Send ConnInfo to client-side broker",
-            LOG_PREFIX,
+            "newServer({}) - Send ConnInfo to client-side broker",
             service_id
         );
 
-        log::trace!(
-            "{} - newServer({}) - returning service_id.",
-            LOG_PREFIX,
-            service_id
-        );
+        log::trace!("newServer({}) - returning service_id.", service_id);
         Ok(service_id)
     }
 
@@ -251,32 +240,24 @@ impl JsonRpcBroker {
         mut stream: Streaming<ConnInfo>,
         host_services: Arc<Mutex<HashMap<ServiceId, Option<ConnInfo>>>>,
     ) {
-        log::info!(
-            "{}blocking_incoming_conn - perpetually listening for incoming ConnInfo's",
-            LOG_PREFIX
-        );
+        log::info!("blocking_incoming_conn - perpetually listening for incoming ConnInfo's",);
         while let Some(conn_info_result) = stream.next().await {
             match conn_info_result {
                 Err(e) => {
                     log::error!(
-                        "{}blocking_incoming_conn - an error occurred reading from the stream: {:?}",
-                        LOG_PREFIX,
+                        "blocking_incoming_conn - an error occurred reading from the stream: {:?}",
                         e
                     );
                     break; //out of the while loop
                 }
                 Ok(conn_info) => {
-                    log::info!("{}Received conn_info: {:?}", LOG_PREFIX, conn_info);
+                    log::info!("Received conn_info: {:?}", conn_info);
 
                     let mut hs = host_services.lock().await;
-                    log::trace!(
-                        "{}Write-locked the host services to add the new ConnInfo",
-                        LOG_PREFIX
-                    );
+                    log::trace!("Write-locked the host services to add the new ConnInfo",);
 
                     log::trace!(
-                        "{}Only creating a new entry if one doesn't exist for this ServiceId: {}",
-                        LOG_PREFIX,
+                        "Only creating a new entry if one doesn't exist for this ServiceId: {}",
                         conn_info.service_id
                     );
                     hs.entry(conn_info.service_id)
@@ -284,9 +265,6 @@ impl JsonRpcBroker {
                 }
             }
         }
-        log::info!(
-            "{}blocking_incoming_conn - exiting due to stream returning None or an error",
-            LOG_PREFIX
-        );
+        log::info!("blocking_incoming_conn - exiting due to stream returning None or an error",);
     }
 }

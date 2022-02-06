@@ -36,8 +36,6 @@ const LOCALHOST_BIND_ADDR: &str = "0.0.0.0";
 // How should other processes on the localhost address localhost?
 const LOCALHOST_ADVERTISE_ADDR: &str = "127.0.0.1";
 
-const LOG_PREFIX: &str = "GrrPlugin::Server: ";
-
 pub struct HandshakeConfig {
     pub magic_cookie_key: String,
     pub magic_cookie_value: String,
@@ -106,7 +104,7 @@ impl Server {
     pub async fn jsonrpc_broker(&mut self) -> Result<JsonRpcBroker, Error> {
         let outgoing_conninfo_sender = match self.outgoing_conninfo_sender_receiver.recv().await {
             None => {
-                let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?", LOG_PREFIX);
+                let err = anyhow!("jsonrpc_server_broker's transmission channel was None, which, being initalized in the constructor, was vended off already. Was this method called twice? Did someone else .recv() it?");
                 log::error!("{}", err);
                 return Err(Error::Other(err));
             }
@@ -119,7 +117,7 @@ impl Server {
             .await
         {
             None => {
-                let err = anyhow!("{} jsonrpc_server_broker - jsonrpc_server_broker's  receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.", LOG_PREFIX);
+                let err = anyhow!("jsonrpc_server_broker's receiver for a future incoming stream of ConnInfo was None, which, being initalized in the constructor, was vended off already.");
                 log::error!("{}", err);
                 return Err(Error::Other(err));
             }
@@ -127,10 +125,7 @@ impl Server {
         };
 
         // create the JSON-RPC 2.0 server broker
-        log::trace!(
-            "{}new -  Creating the JSON RPC 2.0 Server Broker.",
-            LOG_PREFIX
-        );
+        log::trace!("Creating the JSON RPC 2.0 Server Broker.",);
         let jsonrpc_broker = JsonRpcBroker::new(
             unique_port::UniquePort::new(),
             LOCALHOST_BIND_ADDR.to_string(),
@@ -139,26 +134,25 @@ impl Server {
             incoming_conninfo_stream_receiver,
         );
 
-        log::info!("{}new -  Created JSON RPC 2.0 Server Broker.", LOG_PREFIX);
+        log::info!("Created JSON RPC 2.0 Server Broker.");
 
         Ok(jsonrpc_broker)
     }
 
     // Copied from: https://github.com/hashicorp/go-plugin/blob/master/server.go#L247
     fn validate_magic_cookie(&self) -> Result<(), Error> {
-        log::info!("{}Validating the magic environment cookies to conduct the handshake. Expecting environment variable {}={}.",LOG_PREFIX, self.handshake_config.magic_cookie_key, self.handshake_config.magic_cookie_value);
+        log::info!("Validating the magic environment cookies to conduct the handshake. Expecting environment variable {}={}.", self.handshake_config.magic_cookie_key, self.handshake_config.magic_cookie_value);
         match env::var(&self.handshake_config.magic_cookie_key) {
             Ok(value) => {
                 if value == self.handshake_config.magic_cookie_value {
-                    log::info!("{}Handshake succeeded!", LOG_PREFIX);
+                    log::info!("Handshake succeeded!");
                     return Ok(());
                 } else {
-                    log::error!("{}Handshake failed due to environment variable {}'s value being {}, but expected to be {}.", LOG_PREFIX,self.handshake_config.magic_cookie_key, value, self.handshake_config.magic_cookie_value);
+                    log::error!("Handshake failed due to environment variable {}'s value being {}, but expected to be {}.",self.handshake_config.magic_cookie_key, value, self.handshake_config.magic_cookie_value);
                 }
             }
             Err(e) => log::error!(
-                "{}Handshake failed due to error reading environment variable {}: {:?}",
-                LOG_PREFIX,
+                "Handshake failed due to error reading environment variable {}: {:?}",
                 self.handshake_config.magic_cookie_key,
                 e
             ),
@@ -178,7 +172,7 @@ impl Server {
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
-        log::trace!("{}serve - serving over a Tcp Socket...", LOG_PREFIX);
+        log::trace!("serving over a Tcp Socket...");
 
         self.validate_magic_cookie().context("Failed to validate magic cookie handshake from plugin client (i.e. host, i.e. consumer) to this Plugin.")?;
 
@@ -186,7 +180,7 @@ impl Server {
 
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<S>().await;
-        log::info!("{}serve -  gRPC Health Service created.", LOG_PREFIX);
+        log::info!("gRPC Health Service created.");
 
         let service_port = match unique_port::UniquePort::new().get_unused_port() {
             Some(p) => p,
@@ -198,7 +192,7 @@ impl Server {
             }
         };
 
-        log::info!("{}new - picked broker port: {}", LOG_PREFIX, service_port);
+        log::info!("picked broker port: {}", service_port);
 
         let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
         let addr = addrstr.parse().with_context(|| {
@@ -216,18 +210,14 @@ impl Server {
             service_port
         );
 
-        log::trace!(
-            "{}serve - Created Handshake string: {}",
-            LOG_PREFIX,
-            handshakestr
-        );
+        log::trace!("Created Handshake string: {}", handshakestr);
 
         let outgoing_conninfo_receiver = match self.outgoing_conninfo_receiver_receiver.recv().await {
             Some(outgoing_conninfo_receiver) => outgoing_conninfo_receiver,
             None => return Err(Error::Other(anyhow!("Outgoing ConnInfo receiver does not exist. Did someone else .recv() it before? It was created in the constructor, so should be available in the method."))),
         };
 
-        log::info!("{} serve - Creating a GRPC Broker Server.", LOG_PREFIX);
+        log::info!("Creating a GRPC Broker Server.");
         // mspc Senders can be cloned. Receivers need all the attention and queueing.
         let broker_server = grpc_broker::new_server(
             outgoing_conninfo_receiver,
@@ -235,12 +225,12 @@ impl Server {
         )
         .await?;
 
-        log::info!("{} serve - Creating a GRPC Controller Server.", LOG_PREFIX);
+        log::info!("Creating a GRPC Controller Server.");
         let controller_server = grpc_controller::new_server(trigger);
-        log::info!("{} serve - Creating a GRPC Stdio Server.", LOG_PREFIX);
+        log::info!("Creating a GRPC Stdio Server.");
         let stdio_server = grpc_stdio::new_server();
 
-        log::info!("{}serve - Starting service...", LOG_PREFIX);
+        log::info!("Starting service...");
 
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)
@@ -250,22 +240,14 @@ impl Server {
             .add_service(plugin)
             .serve_with_shutdown(addr, async { listener.await });
 
-        log::info!(
-            "{}About to print handshake string: {}",
-            LOG_PREFIX,
-            handshakestr
-        );
+        log::info!("About to print handshake string: {}", handshakestr);
         println!("{}                        \n\n", handshakestr);
 
         // starting broker and plugin services now...
         //join!(broker_service_future, plugin_service_future);
         let result = grpc_service_future.await;
 
-        log::info!(
-            "{}gRPC broker service ended with result: {:?}",
-            LOG_PREFIX,
-            result
-        );
+        log::info!("gRPC broker service ended with result: {:?}", result);
 
         Ok(())
     }
