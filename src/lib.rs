@@ -27,6 +27,8 @@ pub use tonic::{Status, Streaming};
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+pub type ServiceId = u32;
+
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
 const GRPC_CORE_PROTOCOL_VERSION: usize = 1;

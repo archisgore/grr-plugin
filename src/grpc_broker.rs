@@ -3,16 +3,12 @@
 use super::unique_port::UniquePort;
 use super::unix::{incoming_from_path, TempSocket};
 use super::Error;
+use super::ServiceId;
 use super::{ConnInfo, Status};
 use anyhow::{Context, Result};
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
-use hyper::{
-    service::{make_service_fn as make_hyper_service_fn, service_fn as hyper_service_fn},
-    Body, Request, Response, Server,
-};
-use hyperlocal::UnixServerExt;
-use jsonrpc_http_server::jsonrpc_core::IoHandler;
+use hyper::{Body, Request, Response};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +22,6 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn as tower_service_fn;
 use tower::Service;
-
-type ServiceId = u32;
 
 // Brokers connections by service_id
 // Not necessarily threadsafe, so caller should Arc<RwLock<>> this,
