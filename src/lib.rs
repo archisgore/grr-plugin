@@ -6,6 +6,7 @@ mod grpc_controller;
 mod grpc_stdio;
 mod json_rpc_broker;
 mod unique_port;
+pub mod unix;
 
 use error::Error;
 
@@ -28,13 +29,6 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 // The constants are for generating the go-plugin string
 // https://github.com/hashicorp/go-plugin/blob/master/docs/guide-plugin-write-non-go.md
 const GRPC_CORE_PROTOCOL_VERSION: usize = 1;
-
-/// Golang/go-plugin don't support IPV6 yet. Yes, yes, I know...
-// bind to ALL addresses on Localhost
-const LOCALHOST_BIND_ADDR: &str = "0.0.0.0";
-
-// How should other processes on the localhost address localhost?
-const LOCALHOST_ADVERTISE_ADDR: &str = "127.0.0.1";
 
 pub struct HandshakeConfig {
     pub magic_cookie_key: String,
@@ -128,8 +122,6 @@ impl Server {
         log::trace!("Creating the JSON RPC 2.0 Server Broker.",);
         let jsonrpc_broker = JsonRpcBroker::new(
             unique_port::UniquePort::new(),
-            LOCALHOST_BIND_ADDR.to_string(),
-            LOCALHOST_ADVERTISE_ADDR.to_string(),
             outgoing_conninfo_sender,
             incoming_conninfo_stream_receiver,
         );
@@ -182,35 +174,18 @@ impl Server {
         health_reporter.set_serving::<S>().await;
         log::info!("gRPC Health Service created.");
 
-        let service_port = match unique_port::UniquePort::new().get_unused_port() {
-            Some(p) => p,
-            None => {
-                let err =
-                    anyhow!("Unable to find a free unused TCP port to bind the gRPC server to");
-                log::error!("{}", err);
-                return Err(Error::Other(err));
-            }
-        };
-
-        log::info!("picked broker port: {}", service_port);
-
-        let addrstr = format!("{}:{}", LOCALHOST_BIND_ADDR, service_port);
-        let addr = addrstr.parse().with_context(|| {
-            format!(
-                "Failed to parse address string into a valid Socket address: {}",
-                addrstr
-            )
-        })?;
+        let socket_path = unix::temp_socket_path().await?;
+        log::trace!("Created new temp socket: {}", socket_path);
 
         let handshakestr = format!(
-            "{}|{}|tcp|{}:{}|grpc|",
-            GRPC_CORE_PROTOCOL_VERSION,
-            self.protocol_version,
-            LOCALHOST_ADVERTISE_ADDR,
-            service_port
+            "{}|{}|unix|{}|grpc|",
+            GRPC_CORE_PROTOCOL_VERSION, self.protocol_version, socket_path,
         );
-
         log::trace!("Created Handshake string: {}", handshakestr);
+
+        // create incoming stream from unix socket above...
+        let incoming_stream_from_socket = unix::incoming_from_path(socket_path.as_str()).await?;
+        log::trace!("Created Incoming unix stream from the socket");
 
         let outgoing_conninfo_receiver = match self.outgoing_conninfo_receiver_receiver.recv().await {
             Some(outgoing_conninfo_receiver) => outgoing_conninfo_receiver,
@@ -231,17 +206,16 @@ impl Server {
         let stdio_server = grpc_stdio::new_server();
 
         log::info!("Starting service...");
-
         let grpc_service_future = tonic::transport::Server::builder()
             .add_service(health_service)
             .add_service(broker_server)
             .add_service(controller_server)
             .add_service(stdio_server)
             .add_service(plugin)
-            .serve_with_shutdown(addr, async { listener.await });
+            .serve_with_incoming_shutdown(incoming_stream_from_socket, async { listener.await });
 
         log::info!("About to print handshake string: {}", handshakestr);
-        println!("{}                        \n\n", handshakestr);
+        println!("{}", handshakestr);
 
         // starting broker and plugin services now...
         //join!(broker_service_future, plugin_service_future);

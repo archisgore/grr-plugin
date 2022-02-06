@@ -1,13 +1,18 @@
 // Because of course something using Golang and gRPC has to be overtly complex in new and innovative ways.
 // The secondary streams brokered by GRPC Broker are JSON-RPC 2.0, wouldn't you know?
 use super::unique_port::UniquePort;
+use super::unix;
 use super::Error;
 use super::{ConnInfo, Status};
 use anyhow::{Context, Result};
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
+use hyper::{
+    service::{make_service_fn as make_hyper_service_fn, service_fn as hyper_service_fn},
+    Body, Response, Server,
+};
+use hyperlocal::UnixServerExt;
 use jsonrpc_http_server::jsonrpc_core::IoHandler;
-use jsonrpc_http_server::ServerBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +22,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
-use tower::service_fn;
+use tower::service_fn as tower_service_fn;
 
 type ServiceId = u32;
 
@@ -27,12 +32,6 @@ type ServiceId = u32;
 pub struct JsonRpcBroker {
     unique_port: UniquePort,
     next_id: Mutex<u32>,
-
-    // The IP address to bind to (usually 0.0.0.0 or equivalent)
-    bind_ip: String,
-
-    // The IP address to advertise (usually 127.0.0.1 or equivalent)
-    advertise_ip: String,
 
     // Send the client information on new services and their endpoints
     outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
@@ -47,8 +46,6 @@ pub struct JsonRpcBroker {
 impl JsonRpcBroker {
     pub fn new(
         unique_port: UniquePort,
-        bind_ip: String,
-        advertise_ip: String,
         outgoing_conninfo_sender: UnboundedSender<Result<ConnInfo, Status>>,
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
     ) -> Self {
@@ -78,70 +75,57 @@ impl JsonRpcBroker {
         Self {
             next_id: Mutex::new(1), // start next id at a number where it won't conflict with other services
             unique_port,
-            bind_ip,
-            advertise_ip,
             outgoing_conninfo_sender,
             host_services,
         }
     }
 
-    pub async fn new_server(&mut self, handler: IoHandler) -> Result<ServiceId, Error> {
+    pub async fn new_server(&mut self, _handler: IoHandler) -> Result<ServiceId, Error> {
         log::trace!("called");
+
         // get next service_id, increment the underlying value, and release lock in the block
         let service_id = self.next_service_id().await;
-
         log::debug!("newServer - created next service_id: {}", service_id);
-        // let's find an unusued port
-        let service_port = match self.unique_port.get_unused_port() {
-            Some(p) => p,
-            None => return Err(Error::NoTCPPortAvailable),
-        };
 
-        let bind_addrstr = format!("{}:{}", self.bind_ip, service_port);
-        log::trace!(
-            "newServer({}) - created bind address string: {}",
-            service_id,
-            bind_addrstr
-        );
+        let socket_path = unix::temp_socket_path().await?;
+        log::info!("Created a temp socket path: {}", socket_path);
 
-        let bind_addr = &bind_addrstr.parse()?;
+        let make_service = make_hyper_service_fn(|_| async {
+            Ok::<_, hyper::Error>(hyper_service_fn(|req| async move {
+                log::info!("Request into hyperlocal: {:?}", req);
+                Ok::<_, hyper::Error>(Response::new(Body::from("Hello World")))
+            }))
+        });
+        log::info!("Created a new hello world service");
 
-        log::trace!("newServer({}) - about to create server...", service_id);
-        let server = ServerBuilder::new(handler)
-            .start_http(bind_addr)
-            .with_context(|| {
-                format!(
-                    "Failed to build a JSON-RPC 2.0 server bound to address {}",
-                    bind_addr
-                )
-            })?;
+        log::info!("Binding HTTP Server to path: {:?}", socket_path);
+        let server = Server::bind_unix(socket_path.clone())?;
 
         tokio::spawn(async move {
             log::trace!(
                 "newServer({}) - spawned into separate task to wait for this server to complete...",
                 service_id
             );
-            server.wait();
+            if let Err(err) = server.serve(make_service).await {
+                log::error!(
+                    "newServer({}) - Server exited with error: {}",
+                    service_id,
+                    err
+                )
+            }
             log::info!(
                 "newServer({}) - server.wait() exited. Server has stopped",
                 service_id
             );
         });
 
-        let advertise_addrstr = format!("{}:{}", self.advertise_ip, service_port);
-        log::trace!(
-            "newServer({}) - created advertise address string: {}",
-            service_id,
-            advertise_addrstr
-        );
-
         log::trace!(
             "newServer({}) - Creating ConnInfo for this service to send to the client-side broker.",
             service_id
         );
         let conn_info = ConnInfo {
-            network: "tcp".to_string(),
-            address: advertise_addrstr,
+            network: "unix".to_string(),
+            address: socket_path,
             service_id,
         };
 
@@ -187,7 +171,7 @@ impl JsonRpcBroker {
             "unix" => {
                 // Copied from: https://github.com/hyperium/tonic/blob/master/examples/src/uds/client.rs
                 Endpoint::try_from("http://[::]:50051")?
-                    .connect_with_connector(service_fn(move |_: Uri| {
+                    .connect_with_connector(tower_service_fn(move |_: Uri| {
                         // Connect to a Uds socket
                         // The clone ensures this closure doesn't consume the environment.
                         UnixStream::connect(conn_info.address.clone())
