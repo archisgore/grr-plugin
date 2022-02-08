@@ -92,11 +92,11 @@ impl GRpcBroker {
         <S as Service<http::Request<hyper::Body>>>::Error:
             Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
-        log::trace!("called");
+        log::info!("called");
 
         // get next service_id, increment the underlying value, and release lock in the block
         let service_id = self.next_service_id().await;
-        log::debug!("newServer - created next service_id: {}", service_id);
+        log::info!("newServer - created next service_id: {}", service_id);
 
         let temp_socket = TempSocket::new()
         .with_context(|| format!("newServer({}) Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server", service_id))?;
@@ -111,7 +111,7 @@ impl GRpcBroker {
         let listener = self.listener.clone();
 
         tokio::spawn(async move {
-            log::info!(
+            log::debug!(
                 "newServer({}) - spawned into separate task to wait for this server to complete...",
                 service_id
             );
@@ -122,24 +122,25 @@ impl GRpcBroker {
             // create incoming stream from unix socket above...
             let incoming_stream_from_socket = incoming_from_path(socket_path.as_str()).await
                 .with_context(|| format!("newServer({}) Inside spawned grpc server, unable to open incoming UnixStream from socket {}", service_id, socket_path.as_str())).unwrap();
-            log::trace!("Inside spawned grpc server, created Incoming unix stream from the socket");
+            log::trace!("newServer({}) Inside spawned grpc server, created Incoming unix stream from the socket", service_id);
 
-            log::info!("Inside spawned grpc server, starting a new grpc service...");
+            log::info!("newServer({}) Inside spawned grpc server, starting a new grpc service...", service_id);
             let grpc_service_future = tonic::transport::Server::builder()
                 .add_service(plugin)
                 .serve_with_incoming_shutdown(incoming_stream_from_socket, async {
                     listener.await
                 });
 
-            grpc_service_future
+            if let Err(err) = grpc_service_future
                 .await
                 .with_context(|| {
                     format!(
                         "newServer({}) Inside spawned grpc server, service future failed",
                         service_id
                     )
-                })
-                .unwrap();
+                }) {
+                    log::error!("newServer({}) Inside spawned grpc server, it errored: {}", service_id, err);
+                }
 
             log::info!(
                 "newServer({}) Inside spawned grpc server, exiting task. Service has ended.",
@@ -147,7 +148,7 @@ impl GRpcBroker {
             );
         });
 
-        log::trace!(
+        log::debug!(
             "newServer({}) - Creating ConnInfo for this service to send to the client-side broker.",
             service_id
         );
@@ -157,7 +158,7 @@ impl GRpcBroker {
             service_id,
         };
 
-        log::trace!(
+        log::debug!(
             "newServer({}) - Created ConnInfo for this service: {:?}",
             service_id,
             conn_info
@@ -171,7 +172,7 @@ impl GRpcBroker {
                     conn_info
                 )
             })?;
-        log::trace!(
+        log::info!(
             "newServer({}) - Sent ConnInfo to client-side broker",
             service_id
         );
@@ -277,5 +278,25 @@ impl GRpcBroker {
             }
         }
         log::info!("blocking_incoming_conn - exiting due to stream returning None or an error",);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio::sync::mpsc::unbounded_channel;
+    use crate::unique_port;
+
+    #[tokio::test]
+    async fn test_service_id_increment()  {
+        let (_t, l) = triggered::trigger();
+        let (t1, _r1) = unbounded_channel::<Result<ConnInfo, Status>>();
+        let (_t2, r2) = unbounded_channel::<Streaming<ConnInfo>>();
+        let mut g = GRpcBroker::new(unique_port::UniquePort::new(), t1, r2, l);
+        assert_eq!(1, g.next_service_id().await);
+        assert_eq!(2, g.next_service_id().await);
+        assert_eq!(3, g.next_service_id().await);
+        assert_eq!(4, g.next_service_id().await);
+        assert_eq!(5, g.next_service_id().await);
     }
 }
