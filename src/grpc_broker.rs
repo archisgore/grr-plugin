@@ -49,7 +49,7 @@ impl GRpcBroker {
         mut incoming_conninfo_stream_receiver_receiver: UnboundedReceiver<Streaming<ConnInfo>>,
         listener: triggered::Listener,
     ) -> Self {
-        log::trace!("called");
+        log::info!("Creating new GrpcBroker");
         let host_services = Arc::new(Mutex::new(HashMap::new()));
 
         log::trace!("spawning a process to receive the stream of incoming ConnInfo's, and then the ConnInfo's themselves from host side...");
@@ -124,23 +124,28 @@ impl GRpcBroker {
                 .with_context(|| format!("newServer({}) Inside spawned grpc server, unable to open incoming UnixStream from socket {}", service_id, socket_path.as_str())).unwrap();
             log::trace!("newServer({}) Inside spawned grpc server, created Incoming unix stream from the socket", service_id);
 
-            log::info!("newServer({}) Inside spawned grpc server, starting a new grpc service...", service_id);
+            log::info!(
+                "newServer({}) Inside spawned grpc server, starting a new grpc service...",
+                service_id
+            );
             let grpc_service_future = tonic::transport::Server::builder()
                 .add_service(plugin)
                 .serve_with_incoming_shutdown(incoming_stream_from_socket, async {
                     listener.await
                 });
 
-            if let Err(err) = grpc_service_future
-                .await
-                .with_context(|| {
-                    format!(
-                        "newServer({}) Inside spawned grpc server, service future failed",
-                        service_id
-                    )
-                }) {
-                    log::error!("newServer({}) Inside spawned grpc server, it errored: {}", service_id, err);
-                }
+            if let Err(err) = grpc_service_future.await.with_context(|| {
+                format!(
+                    "newServer({}) Inside spawned grpc server, service future failed",
+                    service_id
+                )
+            }) {
+                log::error!(
+                    "newServer({}) Inside spawned grpc server, it errored: {}",
+                    service_id,
+                    err
+                );
+            }
 
             log::info!(
                 "newServer({}) Inside spawned grpc server, exiting task. Service has ended.",
@@ -284,11 +289,11 @@ impl GRpcBroker {
 #[cfg(test)]
 mod test {
     use super::*;
-    use tokio::sync::mpsc::unbounded_channel;
     use crate::unique_port;
+    use tokio::sync::mpsc::unbounded_channel;
 
     #[tokio::test]
-    async fn test_service_id_increment()  {
+    async fn test_service_id_increment() {
         let (_t, l) = triggered::trigger();
         let (t1, _r1) = unbounded_channel::<Result<ConnInfo, Status>>();
         let (_t2, r2) = unbounded_channel::<Streaming<ConnInfo>>();
