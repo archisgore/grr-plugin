@@ -22,13 +22,16 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn as tower_service_fn;
 use tower::Service;
+use std::collections::HashSet;
+use anyhow::anyhow;
 
 // Brokers connections by service_id
 // Not necessarily threadsafe, so caller should Arc<RwLock<>> this,
 // but I don't know how you'd get multiple mutable references without that anyway.
 pub struct GRpcBroker {
     unique_port: UniquePort,
-    next_id: Mutex<u32>,
+    used_ids: HashSet<u32>,
+    next_id: u32,
 
     listener: triggered::Listener,
 
@@ -73,7 +76,8 @@ impl GRpcBroker {
         });
 
         Self {
-            next_id: Mutex::new(1), // start next id at a number where it won't conflict with other services
+            next_id: 1, // start next id at a number where it won't conflict with other services
+            used_ids: HashSet::new(),
             unique_port,
             outgoing_conninfo_sender,
             host_services,
@@ -81,7 +85,27 @@ impl GRpcBroker {
         }
     }
 
-    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
+    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error> 
+    where
+    S: Service<Request<Body>, Response = Response<BoxBody>>
+        + NamedService
+        + Clone
+        + Send
+        + 'static,
+    <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
+    <S as Service<http::Request<hyper::Body>>>::Error:
+        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
+        log::info!("called");
+
+        // get next service_id, increment the underlying value, and release lock in the block
+        let service_id = self.get_unused_service_id();
+        log::info!("newServer - obtained an unused service_id: {}", service_id);
+
+        self.new_grpc_server_with_service_id(service_id, plugin).await
+    }
+
+    pub async fn new_grpc_server_with_service_id<S>(&mut self, service_id: ServiceId, plugin: S) -> Result<ServiceId, Error>
     where
         S: Service<Request<Body>, Response = Response<BoxBody>>
             + NamedService
@@ -94,9 +118,12 @@ impl GRpcBroker {
     {
         log::info!("called");
 
-        // get next service_id, increment the underlying value, and release lock in the block
-        let service_id = self.next_service_id().await;
-        log::info!("newServer - created next service_id: {}", service_id);
+        if self.used_ids.contains(&service_id) {
+            return Err(Error::Other(anyhow!("In GrpcBroker, the service_id {} was provided to open a new server with, but it was found to exist already in the used set.", service_id)))
+        }
+
+        // reserve current service_id
+        self.used_ids.insert(service_id);
 
         let temp_socket = TempSocket::new()
         .with_context(|| format!("newServer({}) Failed to create a new TempSocket for opening a new JSON-RPC 2.0 server", service_id))?;
@@ -185,11 +212,14 @@ impl GRpcBroker {
         Ok(service_id)
     }
 
-    pub async fn next_service_id(&mut self) -> u32 {
-        let mut next_id = self.next_id.lock().await;
-        let service_id = *next_id;
-        *next_id += 1;
-        service_id
+    pub fn get_unused_service_id(&mut self) -> u32 {
+        // keep incrementing next_id so long as it has already been used.
+        while self.used_ids.contains(&self.next_id) {
+            self.next_id += 1;
+        }
+
+        // return service_id that is not yet used.
+        self.next_id
     }
 
     pub fn get_unused_port(&mut self) -> Option<u16> {
@@ -298,10 +328,21 @@ mod test {
         let (t1, _r1) = unbounded_channel::<Result<ConnInfo, Status>>();
         let (_t2, r2) = unbounded_channel::<Streaming<ConnInfo>>();
         let mut g = GRpcBroker::new(unique_port::UniquePort::new(), t1, r2, l);
-        assert_eq!(1, g.next_service_id().await);
-        assert_eq!(2, g.next_service_id().await);
-        assert_eq!(3, g.next_service_id().await);
-        assert_eq!(4, g.next_service_id().await);
-        assert_eq!(5, g.next_service_id().await);
+
+        g.used_ids.insert(5);
+
+        assert_eq!(1, g.get_unused_service_id());
+        // still unuused
+        assert_eq!(1, g.get_unused_service_id());
+        g.used_ids.insert(1);
+        assert_eq!(2, g.get_unused_service_id());
+        g.used_ids.insert(2);
+        assert_eq!(3, g.get_unused_service_id());
+        g.used_ids.insert(3);
+        assert_eq!(4, g.get_unused_service_id());
+        g.used_ids.insert(4);
+
+        // skip 5 which was pre-inserted
+        assert_eq!(6, g.get_unused_service_id());
     }
 }
