@@ -5,11 +5,13 @@ use super::unix::{incoming_from_path, TempSocket};
 use super::Error;
 use super::ServiceId;
 use super::{ConnInfo, Status};
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
 use hyper::{Body, Request, Response};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -22,8 +24,6 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn as tower_service_fn;
 use tower::Service;
-use std::collections::HashSet;
-use anyhow::anyhow;
 
 // Brokers connections by service_id
 // Not necessarily threadsafe, so caller should Arc<RwLock<>> this,
@@ -85,16 +85,16 @@ impl GRpcBroker {
         }
     }
 
-    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error> 
+    pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
     where
-    S: Service<Request<Body>, Response = Response<BoxBody>>
-        + NamedService
-        + Clone
-        + Send
-        + 'static,
-    <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
-    <S as Service<http::Request<hyper::Body>>>::Error:
-        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+        S: Service<Request<Body>, Response = Response<BoxBody>>
+            + NamedService
+            + Clone
+            + Send
+            + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
+        <S as Service<http::Request<hyper::Body>>>::Error:
+            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     {
         log::info!("called");
 
@@ -102,10 +102,15 @@ impl GRpcBroker {
         let service_id = self.get_unused_service_id();
         log::info!("newServer - obtained an unused service_id: {}", service_id);
 
-        self.new_grpc_server_with_service_id(service_id, plugin).await
+        self.new_grpc_server_with_service_id(service_id, plugin)
+            .await
     }
 
-    pub async fn new_grpc_server_with_service_id<S>(&mut self, service_id: ServiceId, plugin: S) -> Result<ServiceId, Error>
+    pub async fn new_grpc_server_with_service_id<S>(
+        &mut self,
+        service_id: ServiceId,
+        plugin: S,
+    ) -> Result<ServiceId, Error>
     where
         S: Service<Request<Body>, Response = Response<BoxBody>>
             + NamedService
@@ -119,7 +124,7 @@ impl GRpcBroker {
         log::info!("called");
 
         if self.used_ids.contains(&service_id) {
-            return Err(Error::Other(anyhow!("In GrpcBroker, the service_id {} was provided to open a new server with, but it was found to exist already in the used set.", service_id)))
+            return Err(Error::Other(anyhow!("In GrpcBroker, the service_id {} was provided to open a new server with, but it was found to exist already in the used set.", service_id)));
         }
 
         // reserve current service_id
