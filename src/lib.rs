@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use http::{Request, Response};
 use hyper::Body;
 use std::clone::Clone;
+use std::convert::Infallible;
 use std::env;
 use std::marker::Send;
 use tonic::body::BoxBody;
@@ -165,7 +166,7 @@ impl Server {
 
     pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
             + NamedService
             + Clone
             + Send

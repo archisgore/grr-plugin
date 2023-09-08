@@ -12,6 +12,7 @@ use futures::stream::StreamExt;
 use hyper::{Body, Request, Response};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -87,7 +88,7 @@ impl GRpcBroker {
 
     pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
             + NamedService
             + Clone
             + Send
@@ -112,7 +113,7 @@ impl GRpcBroker {
         plugin: S,
     ) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
             + NamedService
             + Clone
             + Send
