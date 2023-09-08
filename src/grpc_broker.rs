@@ -88,7 +88,7 @@ impl GRpcBroker {
 
     pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
             + NamedService
             + Clone
             + Send
@@ -113,7 +113,7 @@ impl GRpcBroker {
         plugin: S,
     ) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
             + NamedService
             + Clone
             + Send

@@ -166,7 +166,7 @@ impl Server {
 
     pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error=Infallible>
+        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
             + NamedService
             + Clone
             + Send
