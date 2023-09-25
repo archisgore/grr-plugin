@@ -225,7 +225,7 @@ impl Server {
             .add_service(controller_server)
             .add_service(stdio_server)
             .add_service(plugin)
-            .serve_with_incoming_shutdown(incoming_stream_from_socket, async { listener.await });
+            .serve_with_incoming_shutdown(incoming_stream_from_socket, listener);
 
         log::info!("About to print handshake string: {}", handshakestr);
         println!("{}", handshakestr);

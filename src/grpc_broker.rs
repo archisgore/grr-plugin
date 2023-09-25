@@ -163,9 +163,7 @@ impl GRpcBroker {
             );
             let grpc_service_future = tonic::transport::Server::builder()
                 .add_service(plugin)
-                .serve_with_incoming_shutdown(incoming_stream_from_socket, async {
-                    listener.await
-                });
+                .serve_with_incoming_shutdown(incoming_stream_from_socket, listener);
 
             if let Err(err) = grpc_service_future.await.with_context(|| {
                 format!(
