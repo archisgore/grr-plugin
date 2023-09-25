@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      - name: Clean Cargo Cache
+        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest rm -rf .*
+
       - name: Style (rustfmt)
         run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo fmt --all -- --check
 
