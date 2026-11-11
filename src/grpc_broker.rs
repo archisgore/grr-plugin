@@ -9,7 +9,8 @@ use anyhow::anyhow;
 use anyhow::{Context, Result};
 use async_recursion::async_recursion;
 use futures::stream::StreamExt;
-use hyper::{Body, Request, Response};
+use http::{Request, Response};
+use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -19,8 +20,8 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tonic::body::BoxBody;
-use tonic::transport::NamedService;
+use tonic::body::Body;
+use tonic::server::NamedService;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Streaming;
 use tower::service_fn as tower_service_fn;
@@ -88,14 +89,13 @@ impl GRpcBroker {
 
     pub async fn new_grpc_server<S>(&mut self, plugin: S) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
+        S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
             + NamedService
             + Clone
             + Send
+            + Sync
             + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Error:
-            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+        S::Future: Send + 'static,
     {
         log::info!("called");
 
@@ -113,14 +113,13 @@ impl GRpcBroker {
         plugin: S,
     ) -> Result<ServiceId, Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
+        S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
             + NamedService
             + Clone
             + Send
+            + Sync
             + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Error:
-            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+        S::Future: Send + 'static,
     {
         log::info!("called");
 
@@ -241,7 +240,12 @@ impl GRpcBroker {
                     .connect_with_connector(tower_service_fn(move |_: Uri| {
                         // Connect to a Uds socket
                         // The clone ensures this closure doesn't consume the environment.
-                        UnixStream::connect(conn_info.address.clone())
+                        let address = conn_info.address.clone();
+                        async move {
+                            Ok::<_, std::io::Error>(TokioIo::new(
+                                UnixStream::connect(address).await?,
+                            ))
+                        }
                     }))
                     .await?
             }
@@ -348,5 +352,66 @@ mod test {
 
         // skip 5 which was pre-inserted
         assert_eq!(6, g.get_unused_service_id());
+    }
+
+    // End-to-end check of the Unix-socket transport: serve a gRPC service through
+    // the broker, then dial it back over the advertised socket and call it.
+    #[tokio::test]
+    async fn test_serve_and_dial_over_unix_socket() {
+        use tonic_health::pb::health_client::HealthClient;
+        use tonic_health::pb::HealthCheckRequest;
+        use tonic_health::ServingStatus;
+
+        let (trigger, listener) = triggered::trigger();
+        let (outgoing_tx, mut outgoing_rx) = unbounded_channel::<Result<ConnInfo, Status>>();
+        let (_incoming_tx, incoming_rx) = unbounded_channel::<Streaming<ConnInfo>>();
+        let mut broker = GRpcBroker::new(
+            unique_port::UniquePort::new(),
+            outgoing_tx,
+            incoming_rx,
+            listener,
+        );
+
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
+        health_reporter
+            .set_service_status("grr.test", ServingStatus::Serving)
+            .await;
+
+        let service_id = broker.new_grpc_server(health_service).await.unwrap();
+        let conn_info = outgoing_rx.recv().await.unwrap().unwrap();
+        assert_eq!(service_id, conn_info.service_id);
+        assert_eq!("unix", conn_info.network);
+
+        // Pretend the host advertised this service back to us, then dial it.
+        // The server task binds the socket asynchronously, so retry briefly; each
+        // dial attempt consumes the advertised ConnInfo, so re-advertise it.
+        let mut channel = None;
+        for _ in 0..50 {
+            broker
+                .host_services
+                .lock()
+                .await
+                .insert(service_id, Some(conn_info.clone()));
+            if let Ok(c) = broker.dial_to_host_service(service_id).await {
+                channel = Some(c);
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        let channel = channel.expect("unable to dial the brokered service");
+
+        let response = HealthClient::new(channel)
+            .check(HealthCheckRequest {
+                service: "grr.test".to_string(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            tonic_health::pb::health_check_response::ServingStatus::Serving as i32,
+            response.status
+        );
+
+        trigger.trigger();
     }
 }

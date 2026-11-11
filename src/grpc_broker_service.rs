@@ -14,7 +14,7 @@ use std::ops::DerefMut;
 use std::pin::Pin;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
-use tonic::transport::NamedService;
+use tonic::server::NamedService;
 use tonic::{async_trait, Request, Response, Status, Streaming};
 
 pub async fn new_server(

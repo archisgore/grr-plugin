@@ -12,13 +12,12 @@ use error::Error;
 
 use anyhow::{anyhow, Context, Result};
 use http::{Request, Response};
-use hyper::Body;
 use std::clone::Clone;
 use std::convert::Infallible;
 use std::env;
 use std::marker::Send;
-use tonic::body::BoxBody;
-use tonic::transport::NamedService;
+use tonic::body::Body;
+use tonic::server::NamedService;
 use tower::Service;
 use unix::TempSocket;
 
@@ -166,20 +165,19 @@ impl Server {
 
     pub async fn serve<S>(&mut self, plugin: S) -> Result<(), Error>
     where
-        S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible>
+        S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
             + NamedService
             + Clone
             + Send
+            + Sync
             + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Future: Send + 'static,
-        <S as Service<http::Request<hyper::Body>>>::Error:
-            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+        S::Future: Send + 'static,
     {
         log::trace!("serving over a Tcp Socket...");
 
         self.validate_magic_cookie().context("Failed to validate magic cookie handshake from plugin client (i.e. host, i.e. consumer) to this Plugin.")?;
 
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter.set_serving::<S>().await;
         log::info!("gRPC Health Service created.");
 
