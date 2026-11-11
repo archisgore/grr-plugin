@@ -2,6 +2,9 @@ name: Build Status
 
 on: [push, pull_request, workflow_dispatch]
 
+permissions:
+  contents: read
+
 jobs:
   # Push image to GitHub Packages. No "testing" because this is a heavy image
   # See also https://docs.docker.com/docker-hub/builds/
@@ -9,21 +12,29 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo-ci/registry
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
       - name: Clean Cargo Cache
-        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest rm -rf /root/.cargo/registry/.*
+        run: docker run -v $HOME/.cargo-ci/registry:/opt/cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest rm -rf /opt/cargo/registry/.*
 
       - name: Style (rustfmt)
-        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo fmt --all -- --check
+        run: docker run -v $HOME/.cargo-ci/registry:/opt/cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo fmt --all -- --check
 
       - name: Lint (Clippy)
-        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: docker run -v $HOME/.cargo-ci/registry:/opt/cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo build-all-features
+        run: docker run -v $HOME/.cargo-ci/registry:/opt/cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo build-all-features
 
       - name: Test
-        run: docker run -v cargo-cache:/root/.cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo test-all-features
+        run: docker run -v $HOME/.cargo-ci/registry:/opt/cargo/registry -v $PWD:/volume --rm -t ghcr.io/archisgore/rust-dev-env:latest cargo test-all-features
 
 
