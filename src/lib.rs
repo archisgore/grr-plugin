@@ -1,4 +1,5 @@
 // A go-plugin Server to write Rust-based plugins to Golang.
+#![doc = include_str!("../README.md")]
 
 pub mod error;
 mod grpc_broker;
