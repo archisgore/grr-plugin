@@ -21,18 +21,18 @@ impl UniquePort {
                 return None;
             }
 
-            match portpicker::pick_unused_port() {
-                None => return None,
-                Some(p) => {
-                    if self.vended_ports.contains(&p) {
-                        log::trace!("Skipped port: {} because it is in the list of previously vended ports: {:?}", p, self.vended_ports);
-                        continue;
-                    } else {
-                        log::trace!("Vending port: {}", p);
-                        self.vended_ports.push(p);
-                        return Some(p);
-                    }
-                }
+            let p = portpicker::pick_unused_port()?;
+            if self.vended_ports.contains(&p) {
+                log::trace!(
+                    "Skipped port: {} because it is in the list of previously vended ports: {:?}",
+                    p,
+                    self.vended_ports
+                );
+                continue;
+            } else {
+                log::trace!("Vending port: {}", p);
+                self.vended_ports.push(p);
+                return Some(p);
             }
         }
     }
