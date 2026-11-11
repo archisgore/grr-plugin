@@ -1,13 +1,13 @@
 name: Build Status
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   # Push image to GitHub Packages. No "testing" because this is a heavy image
   # See also https://docs.docker.com/docker-hub/builds/
   build:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
